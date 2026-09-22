@@ -19,9 +19,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/mindwired/hermess-sdd"
-Repository = "https://github.com/mindwired/hermess-sdd"
-Issues = "https://github.com/mindwired/hermess-sdd/issues"
+Homepage = "https://github.com/mindwired/hermes-sdd"
+Repository = "https://github.com/mindwired/hermes-sdd"
+Issues = "https://github.com/mindwired/hermes-sdd/issues"
 
 [tool.uv]
 package = false

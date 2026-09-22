@@ -1,7 +1,7 @@
 # Agent instructions
 
 This repository is a standalone Hermes plugin. The repository root must remain directly installable by
-`hermes plugins install mindwired/hermess-sdd --enable`; do not move `plugin.yaml` or root `__init__.py`.
+`hermes plugins install mindwired/hermes-sdd --enable`; do not move `plugin.yaml` or root `__init__.py`.
 
 Use `uv` for Python project commands. Runtime code must use the standard library except for the optional
 FastAPI module loaded only by Hermes Dashboard/Desktop. Keep the Agent surface to one `sdd` tool and

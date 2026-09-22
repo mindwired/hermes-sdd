@@ -43,7 +43,7 @@ Dashboard/Desktop backend, where FastAPI is already part of Hermes.
 After publishing this repository on GitHub:
 
 ```bash
-hermes plugins install mindwired/hermess-sdd --enable
+hermes plugins install mindwired/hermes-sdd --enable
 hermes gateway restart
 ```
 
@@ -223,7 +223,7 @@ The script symlinks this checkout into both Hermes plugin locations on POSIX so 
 `0.1.0` is an alpha with project-local state, bounded context packs, evidence gates, and UI adapters. Optional
 Dashboard dependencies and graphical adapters remain deployment gates; skipped integration tests are not treated as
 coverage. Before broad distribution, smoke-test the graphical adapters against the exact Hermes release you deploy.
-The repository is published at [mindwired/hermess-sdd](https://github.com/mindwired/hermess-sdd).
+The repository is published at [mindwired/hermes-sdd](https://github.com/mindwired/hermes-sdd).
 
 ## License
 

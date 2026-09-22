@@ -4,7 +4,7 @@ This directory is intended to become the root of a new GitHub repository.
 
 ## Before publishing
 
-1. Confirm the target repository is `mindwired/hermess-sdd` and keep the manifest plugin name `sdd`.
+1. Confirm the target repository is `mindwired/hermes-sdd` and keep the manifest plugin name `sdd`.
 2. Run all verification commands.
 3. Initialize Git, commit, and push.
 4. Enable GitHub private vulnerability reporting and branch protection.
@@ -23,7 +23,7 @@ uvx --from ruff==0.16.1 ruff format --check .
 ## Live smoke test
 
 ```bash
-hermes plugins install mindwired/hermess-sdd --enable
+hermes plugins install mindwired/hermes-sdd --enable
 hermes gateway restart
 hermes sdd ui install
 hermes sdd doctor

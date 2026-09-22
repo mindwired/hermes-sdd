@@ -6,7 +6,7 @@ Hermes already provides the correct repository installer. Publish this project w
 `__init__.py` at the repository root, then run:
 
 ```bash
-hermes plugins install mindwired/hermess-sdd --enable
+hermes plugins install mindwired/hermes-sdd --enable
 hermes gateway restart
 hermes sdd ui install
 hermes sdd doctor
@@ -76,7 +76,7 @@ hermes sdd status -C /path/to/project
 The following can work for Agent and Dashboard:
 
 ```bash
-git clone https://github.com/mindwired/hermess-sdd.git "$HERMES_HOME/plugins/sdd"
+git clone https://github.com/mindwired/hermes-sdd.git "$HERMES_HOME/plugins/sdd"
 hermes plugins enable sdd
 hermes gateway restart
 ```

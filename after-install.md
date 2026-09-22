@@ -6,7 +6,7 @@ active Hermes profile. You do not need to install SDD again for each project.
 The repository is public. The one-time installation command is:
 
 ```bash
-hermes plugins install mindwired/hermess-sdd --enable
+hermes plugins install mindwired/hermes-sdd --enable
 ```
 
 1. Restart the gateway so Python routes and commands are reloaded:
