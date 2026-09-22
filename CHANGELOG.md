@@ -5,6 +5,13 @@ This project uses semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Use Hermes' qualified `sdd:sdd-*` namespace in the Agent tool guidance and guard it with a registration regression test.
+- Harden canonical state handling against symlink traversal, malformed JSON/JSONL and collection payloads, unsafe
+  stale-lock reclamation, and non-authoritative source-registry failures; require explicit roots for remote terminals.
+- Validate required project schema fields and roll back new or forced initialization if initial rendering fails.
+
 ## [0.1.0] - 2026-08-01
 
 ### Added

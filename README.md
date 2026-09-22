@@ -95,6 +95,14 @@ hermes sdd init auto "Build a local-first observability platform"
 hermes sdd status
 ```
 
+The standalone CLI uses the active Hermes terminal working directory. If it differs from the intended repository,
+pass the project explicitly with `--root` or `-C`. Remote backends such as SSH, Docker, Modal, Daytona, Vercel
+Sandbox, and Singularity require an explicit root:
+
+```bash
+hermes sdd status -C /path/to/project
+```
+
 The same project can be opened later from any Hermes surface. Its `.sdd/` directory is the authoritative local
 state; the installed plugin and its UI adapters stay available globally.
 

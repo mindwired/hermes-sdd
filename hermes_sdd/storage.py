@@ -13,6 +13,57 @@ from pathlib import Path
 from typing import Any, Iterator
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_REMOTE_TERMINAL_BACKENDS = {
+    "docker",
+    "singularity",
+    "modal",
+    "managed_modal",
+    "daytona",
+    "vercel_sandbox",
+    "ssh",
+}
+
+
+def _terminal_backend() -> str:
+    return os.getenv("TERMINAL_ENV", "local").strip().lower() or "local"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Check a lock owner's liveness without sending a signal on Windows."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.WaitForSingleObject.restype = ctypes.c_uint
+            kernel32.GetLastError.restype = ctypes.c_uint
+            handle = kernel32.OpenProcess(0x1000 | 0x100000, False, pid)
+            if not handle:
+                return kernel32.GetLastError() == 5
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == 0x102
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError):
+            return True
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            state = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].strip().split(" ", 1)[0]
+            if state == "Z":
+                return False
+        except (OSError, IndexError):
+            pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def utc_now() -> str:
@@ -22,7 +73,15 @@ def utc_now() -> str:
 
 
 def resolve_root(root: str | os.PathLike[str] | None, *, create: bool = False) -> Path:
-    raw = root or os.getenv("TERMINAL_CWD") or os.getcwd()
+    explicit = root is not None and str(root).strip() != ""
+    if not explicit:
+        backend = _terminal_backend()
+        if backend in _REMOTE_TERMINAL_BACKENDS:
+            raise ValueError(
+                f"Remote terminal backend {backend!r} requires an explicit project root; "
+                "pass root=<path> (or CLI --root/-C)"
+            )
+    raw = str(root) if explicit else (os.getenv("TERMINAL_CWD") or os.getcwd())
     path = Path(raw).expanduser().resolve()
     if create:
         path.mkdir(parents=True, exist_ok=True)
@@ -54,21 +113,41 @@ def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"Malformed SDD JSON object at {path}: expected a JSON object")
+    return value
 
 
-def atomic_write_text(path: Path, content: str) -> None:
+def ensure_no_symlinks(base: Path) -> None:
+    """Reject links anywhere below canonical project metadata."""
+    if base.is_symlink():
+        raise ValueError(f"Refusing symlinked SDD path: {base}")
+    if not base.exists():
+        return
+    for path in base.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"Refusing symlinked SDD path: {path}")
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Refusing symlinked SDD file: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 @contextlib.contextmanager
@@ -79,6 +158,7 @@ def project_transaction(sdd_dir: Path) -> Iterator[None]:
     later state/render failure. This bounded snapshot covers only `.sdd` metadata and excludes
     the lock/cache implementation directories.
     """
+    ensure_no_symlinks(sdd_dir)
     excluded = {sdd_dir / ".locks", sdd_dir / "cache"}
     snapshot: dict[Path, bytes] = {}
     for path in sdd_dir.rglob("*"):
@@ -96,9 +176,10 @@ def project_transaction(sdd_dir: Path) -> Iterator[None]:
         for path in current:
             if path not in snapshot:
                 path.unlink(missing_ok=True)
+        ensure_no_symlinks(sdd_dir)
         for path, content in snapshot.items():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
+            atomic_write_bytes(path, content)
         raise
 
 
@@ -107,6 +188,8 @@ def atomic_write_json(path: Path, value: Any) -> None:
 
 
 def append_jsonl(path: Path, value: dict[str, Any]) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Refusing symlinked SDD file: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     with path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -118,18 +201,23 @@ def append_jsonl(path: Path, value: dict[str, Any]) -> None:
 def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    if path.is_symlink():
+        raise ValueError(f"Refusing symlinked SDD file: {path}")
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                rows.append(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Malformed SDD JSONL at {path}:{line_number}: {exc.msg}") from exc
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"Malformed SDD JSONL at {path}:{line_number}: expected a JSON object"
+                )
+            rows.append(value)
     return rows[-limit:] if limit else rows
 
 
@@ -155,6 +243,17 @@ def project_lock(
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "state.lock"
     deadline = time.monotonic() + timeout
+
+    def owner_is_alive() -> bool:
+        try:
+            metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+            pid = metadata.get("pid")
+            if not isinstance(pid, int) or pid <= 0:
+                return True
+            return _pid_is_alive(pid)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return True
+
     while True:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -164,7 +263,7 @@ def project_lock(
         except FileExistsError:
             try:
                 age = time.time() - lock_path.stat().st_mtime
-                if age > stale_after:
+                if age > stale_after and not owner_is_alive():
                     lock_path.unlink(missing_ok=True)
                     continue
             except OSError:

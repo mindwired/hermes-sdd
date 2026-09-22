@@ -62,6 +62,15 @@ This does not install the plugin again. It creates the authoritative requirement
 checkpoint files for that project. Later, use `hermes sdd status`, `/sdd status`, the `sdd` Agent tool, or the
 Dashboard/Desktop **SDD** page without repeating installation.
 
+The standalone CLI follows the active Hermes terminal working directory. Use `--root`/`-C` when the shell and active
+Hermes project differ. For remote terminal backends such as SSH, Docker, Modal, Daytona, Vercel Sandbox, or
+Singularity, always pass an explicit root because the backend working directory may not identify the host repository:
+
+```bash
+hermes sdd init quick "Describe the project goal" --root /path/to/project
+hermes sdd status -C /path/to/project
+```
+
 ## Is a manual clone sufficient?
 
 The following can work for Agent and Dashboard:
@@ -93,7 +102,8 @@ POSIX:
 ```
 
 This creates development symlinks from the active `$HERMES_HOME` to the checkout. Existing destinations are
-moved to timestamped backups unless they already point to this checkout.
+moved to timestamped backups under `$HERMES_HOME/plugin-backups/sdd/` unless they already point to this checkout.
+Keeping backups outside `$HERMES_HOME/plugins/` prevents Hermes from discovering a stale backup as a second plugin.
 
 Windows PowerShell:
 

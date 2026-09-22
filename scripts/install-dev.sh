@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 PLUGIN_TARGET="$HERMES_HOME/plugins/sdd"
+BACKUP_ROOT="$HERMES_HOME/plugin-backups/sdd"
 DESKTOP_DIR="$HERMES_HOME/desktop-plugins/sdd"
 DESKTOP_TARGET="$DESKTOP_DIR/plugin.js"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -15,8 +16,10 @@ backup_or_remove() {
     return 0
   fi
   if [[ -e "$target" || -L "$target" ]]; then
-    mv "$target" "$target.backup-$STAMP"
-    printf 'Backed up %s\n' "$target"
+    local backup="$BACKUP_ROOT/$(basename "$target").backup-$STAMP"
+    mkdir -p "$BACKUP_ROOT"
+    mv "$target" "$backup"
+    printf 'Backed up %s -> %s\n' "$target" "$backup"
   fi
 }
 

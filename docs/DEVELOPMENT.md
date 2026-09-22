@@ -18,6 +18,9 @@ There are no mandatory third-party runtime or test dependencies. This keeps loca
 possible and avoids installing an independent FastAPI version into Hermes. Integration tests use the FastAPI and
 HTTPX versions already available in the test environment when present; otherwise they skip cleanly.
 
+When the optional Dashboard dependencies are absent, the two Dashboard tests are expected skips rather than passing
+coverage. To execute them explicitly, use the isolated dependency command documented in `docs/VERIFICATION.md`.
+
 ## Test layers
 
 ```bash
@@ -37,9 +40,11 @@ The suite covers:
 - context checkpoints, wildcard file hashes, deltas, and budgets;
 - concurrent independent task transitions and plan revision safety;
 - forced initialization backups;
+- required project schema fields and malformed empty-object state;
+- symlink, malformed-state, typed-collection, registry-projection, remote-root, project-schema, initial-render rollback, and process-aware lock regressions;
 - Agent plugin registration and skill discovery;
 - Desktop adapter installation modes;
-- Dashboard API behavior when FastAPI test support is available;
+- Dashboard API behavior when FastAPI test support is available (the optional Dashboard command is in `docs/VERIFICATION.md`);
 - manifest/version consistency, JavaScript syntax, and release layout.
 
 ## Linting
@@ -66,6 +71,10 @@ Exercise at least:
 3. Dashboard source registration and operations.
 4. Desktop page, status bar, task start, and context copying.
 5. `hermes plugins update` from a test remote or local bare repository.
+
+For a clean native Desktop attempt, use `hermes desktop --cwd /path/to/disposable-project --skip-build` when the
+packaged app is already built, or add `--force-build` to rebuild first. Do not use the active user Desktop as a
+destructive test target.
 
 ## Release
 

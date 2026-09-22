@@ -66,6 +66,12 @@ class RegistrationTest(unittest.TestCase):
             root_plugin.register(context)
             self.assertFalse((Path(temp) / "sdd" / "sources.db").exists())
         self.assertEqual([item["name"] for item in context.tools], ["sdd"])
+        description = context.tools[0]["schema"]["description"]
+        self.assertIn("sdd:sdd-start", description)
+        self.assertIn("sdd:sdd-plan", description)
+        self.assertIn("sdd:sdd-execute", description)
+        self.assertIn("sdd:sdd-verify", description)
+        self.assertNotIn("plugin:sdd-", description)
         self.assertEqual(
             {item[0] for item in context.commands},
             {"sdd", "sdd-status", "sdd-next", "sdd-validate"},

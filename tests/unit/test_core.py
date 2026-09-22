@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from hermes_sdd.context_pack import checkpoint_delta
 from hermes_sdd.core import SDDService, _path_overlap, complexity_mode, tool_response
 from hermes_sdd.registry import SourceRegistry
+from hermes_sdd.storage import project_lock
 
 
 class CoreTestCase(unittest.TestCase):
@@ -339,6 +343,44 @@ class CoreTestCase(unittest.TestCase):
             json.loads((root / ".sdd" / "project.json").read_text())["goal"], "Replacement"
         )
 
+    def test_force_init_validates_before_backup(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        original = (root / ".sdd" / "project.json").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Invalid mode"):
+            self.service.execute(
+                "init",
+                root=str(root),
+                payload={"goal": "Invalid replacement", "mode": "not-a-mode"},
+                options={"force": True},
+            )
+        self.assertEqual((root / ".sdd" / "project.json").read_text(encoding="utf-8"), original)
+        self.assertEqual(list(root.glob(".sdd.backup-*")), [])
+
+    def test_init_rolls_back_new_state_when_render_fails(self) -> None:
+        root = self.root()
+        with patch("hermes_sdd.core.render_all", side_effect=OSError("render failed")):
+            with self.assertRaisesRegex(OSError, "render failed"):
+                self.service.execute(
+                    "init", root=str(root), payload={"goal": "Render failure", "mode": "quick"}
+                )
+        self.assertFalse((root / ".sdd").exists())
+
+    def test_force_init_restores_old_state_when_render_fails(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        original = (root / ".sdd" / "project.json").read_text(encoding="utf-8")
+        with patch("hermes_sdd.core.render_all", side_effect=OSError("render failed")):
+            with self.assertRaisesRegex(OSError, "render failed"):
+                self.service.execute(
+                    "init",
+                    root=str(root),
+                    payload={"goal": "Replacement", "mode": "quick"},
+                    options={"force": True},
+                )
+        self.assertEqual((root / ".sdd" / "project.json").read_text(encoding="utf-8"), original)
+        self.assertEqual(list(root.glob(".sdd.backup-*")), [])
+
     def test_wildcard_checkpoint_tracks_source_changes(self) -> None:
         root = self.root()
         source = root / "src" / "api" / "routes.py"
@@ -409,6 +451,16 @@ class CoreTestCase(unittest.TestCase):
             "context_checkpoint", root=str(root), payload={"task_id": "work"}
         )["checkpoint"]
         self.assertNotIn(".env", snapshot["files"])
+
+    def test_context_checkpoint_rejects_symlinked_authoritative_file(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        outside = self.base / "outside-architecture.md"
+        architecture = root / ".sdd" / "architecture.md"
+        architecture.unlink()
+        architecture.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.service.execute("context_checkpoint", root=str(root))
 
     def test_validation_reports_status_counts_and_uncovered_requirements(self) -> None:
         root = self.root()
@@ -900,6 +952,258 @@ class CoreTestCase(unittest.TestCase):
         plan_path = root / ".sdd" / "milestones" / "M001" / "PLAN.md"
         self.assertTrue(plan_path.is_file())
         self.assertIn("work", plan_path.read_text(encoding="utf-8"))
+
+    def test_symlinked_authoritative_state_is_rejected(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        outside = self.base / "outside-events.jsonl"
+        events = root / ".sdd" / "events.jsonl"
+        events.unlink()
+        events.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.service.execute("status", root=str(root))
+
+        root2 = self.base / "repo2"
+        root2.mkdir()
+        self.initialize(root2, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root2),
+            payload={"id": "M001", "title": "Symlinked milestone"},
+        )
+        outside_milestone = self.base / "outside-milestone"
+        milestone_dir = root2 / ".sdd" / "milestones" / "M001"
+        milestone_dir.rename(outside_milestone)
+        milestone_dir.symlink_to(outside_milestone, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.service.execute("status", root=str(root2))
+
+    def test_symlinked_events_are_rejected_before_context_reads(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        outside = self.base / "outside-events.jsonl"
+        events = root / ".sdd" / "events.jsonl"
+        events.unlink()
+        events.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.service.execute("context_pack", root=str(root))
+
+    def test_registry_projection_failure_does_not_fail_init(self) -> None:
+        class BrokenRegistry:
+            def register(self, *_args, **_kwargs):
+                raise OSError("registry unavailable")
+
+        root = self.root()
+        result = SDDService(BrokenRegistry()).execute(
+            "init", root=str(root), payload={"goal": "Registry failure", "mode": "quick"}
+        )
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["source"])
+        self.assertIn("registry unavailable", result["source_warning"])
+        self.assertTrue((root / ".sdd" / "project.json").is_file())
+
+    def test_registry_initialization_failure_does_not_fail_init(self) -> None:
+        root = self.root()
+        with patch.object(
+            SourceRegistry, "_initialize", side_effect=OSError("registry init unavailable")
+        ):
+            result = SDDService().execute(
+                "init", root=str(root), payload={"goal": "Registry init failure", "mode": "quick"}
+            )
+        self.assertTrue(result["ok"])
+        self.assertIn("registry init unavailable", result["source_warning"])
+        self.assertTrue((root / ".sdd" / "project.json").is_file())
+
+    def test_registry_warning_is_not_persisted_in_canonical_state(self) -> None:
+        class BrokenRegistry:
+            def register(self, *_args, **_kwargs):
+                raise OSError("registry unavailable")
+
+        root = self.root()
+        result = SDDService(BrokenRegistry()).execute(  # type: ignore[arg-type]
+            "init", root=str(root), payload={"goal": "Projection", "mode": "quick"}
+        )
+        self.assertIn("registry unavailable", result["source_warning"])
+        project = json.loads((root / ".sdd" / "project.json").read_text(encoding="utf-8"))
+        self.assertNotIn("source_warning", project)
+
+    def test_malformed_task_list_values_are_rejected(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Types", "interfaces_stable": True},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={"milestone_id": "M001", "tasks": [{"id": "work", "title": "Work"}]},
+        )
+        with self.assertRaisesRegex(ValueError, "file_scope"):
+            self.service.execute(
+                "update_task", root=str(root), target="work", payload={"file_scope": 42}
+            )
+        with self.assertRaisesRegex(ValueError, "acceptance"):
+            self.service.execute(
+                "update_task",
+                root=str(root),
+                target="work",
+                payload={"acceptance": {"unexpected": "object"}},
+            )
+        with self.assertRaisesRegex(ValueError, "decision ids"):
+            self.service.execute(
+                "update_task",
+                root=str(root),
+                target="work",
+                payload={"decision_ids": "ADR-0001"},
+            )
+
+    def test_malformed_canonical_json_is_not_treated_as_empty_state(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        (root / ".sdd" / "project.json").write_text("[]\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            self.service.execute("status", root=str(root))
+
+    def test_empty_canonical_object_is_not_treated_as_healthy_state(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        (root / ".sdd" / "project.json").write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "project.json.*required fields"):
+            self.service.execute("status", root=str(root))
+
+    def test_missing_canonical_project_file_is_not_defaulted(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        (root / ".sdd" / "project.json").unlink()
+        with self.assertRaisesRegex(ValueError, "No SDD project"):
+            self.service.execute("status", root=str(root))
+
+    def test_decision_and_project_list_fields_reject_scalars(self) -> None:
+        root = self.root()
+        with self.assertRaisesRegex(ValueError, "success criteria"):
+            self.service.execute(
+                "init",
+                root=str(root),
+                payload={"goal": "Typed project", "mode": "quick", "success_criteria": "one"},
+            )
+        root = self.base / "repo2"
+        root.mkdir()
+        self.initialize(root, mode="quick")
+        with self.assertRaisesRegex(ValueError, "decision alternatives"):
+            self.service.execute(
+                "record_decision",
+                root=str(root),
+                payload={"title": "Typed decision", "alternatives": "one"},
+            )
+
+    def test_malformed_jsonl_is_not_silently_ignored(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        events = root / ".sdd" / "events.jsonl"
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+        with self.assertRaisesRegex(ValueError, "Malformed SDD JSONL"):
+            self.service.execute("context_pack", root=str(root))
+
+    def test_missing_canonical_state_file_is_not_defaulted(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        (root / ".sdd" / "state.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing required SDD file"):
+            self.service.execute("status", root=str(root))
+
+    def test_upsert_spec_requires_requirement_list(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        with self.assertRaisesRegex(ValueError, "requirements must be a list"):
+            self.service.execute(
+                "upsert_spec",
+                root=str(root),
+                payload={"requirements": "REQ-001"},
+            )
+
+    def test_malformed_plan_and_roadmap_collections_are_rejected(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        roadmap = root / ".sdd" / "roadmap.json"
+        roadmap.write_text('{"milestones": "M001"}\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "milestones must be a list"):
+            self.service.execute("status", root=str(root))
+
+        root2 = self.base / "repo2"
+        root2.mkdir()
+        self.initialize(root2, mode="quick")
+        self.service.execute(
+            "create_milestone", root=str(root2), payload={"id": "M001", "title": "Plan"}
+        )
+        plan = root2 / ".sdd" / "milestones" / "M001" / "plan.json"
+        plan.write_text('{"tasks": "work"}\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "plan tasks must be a list"):
+            self.service.execute(
+                "set_plan",
+                root=str(root2),
+                payload={"milestone_id": "M001", "tasks": [{"id": "replacement"}]},
+            )
+        with self.assertRaisesRegex(ValueError, "plan tasks must be a list"):
+            self.service.execute("next", root=str(root2), target="M001")
+
+    def test_init_does_not_overwrite_partial_sdd_without_force(self) -> None:
+        root = self.root()
+        sdd = root / ".sdd"
+        sdd.mkdir()
+        marker = sdd / "partial.json"
+        marker.write_text("partial\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "incomplete or malformed"):
+            self.service.execute(
+                "init", root=str(root), payload={"goal": "Recover", "mode": "quick"}
+            )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "partial\n")
+        self.assertFalse((sdd / "project.json").exists())
+
+    def test_stale_lock_is_not_removed_while_owner_process_is_alive(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        lock_dir = root / ".sdd" / ".locks"
+        lock_dir.mkdir(exist_ok=True)
+        lock_path = lock_dir / "state.lock"
+        lock_path.write_text('{"pid": %d, "created_at": 0}' % os.getpid(), encoding="utf-8")
+        old_time = time.time() - 1
+        os.utime(lock_path, (old_time, old_time))
+        with self.assertRaises(TimeoutError):
+            with project_lock(root / ".sdd", timeout=0.05, stale_after=0):
+                pass
+
+    def test_stale_lock_from_dead_process_is_reclaimed(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        lock_dir = root / ".sdd" / ".locks"
+        lock_dir.mkdir(exist_ok=True)
+        lock_path = lock_dir / "state.lock"
+        lock_path.write_text('{"pid": 2147483647, "created_at": 0}', encoding="utf-8")
+        old_time = time.time() - 1
+        os.utime(lock_path, (old_time, old_time))
+        with project_lock(root / ".sdd", timeout=0.2, stale_after=0):
+            self.assertTrue(lock_path.exists())
+
+    def test_zombie_lock_owner_is_reclaimable(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        lock_dir = root / ".sdd" / ".locks"
+        lock_dir.mkdir(exist_ok=True)
+        lock_path = lock_dir / "state.lock"
+        lock_path.write_text('{"pid": 2147483647, "created_at": 0}', encoding="utf-8")
+        old_time = time.time() - 1
+        os.utime(lock_path, (old_time, old_time))
+        with patch("hermes_sdd.storage._pid_is_alive", return_value=False):
+            with project_lock(root / ".sdd", timeout=0.2, stale_after=0):
+                self.assertTrue(lock_path.exists())
+
+    def test_implicit_remote_root_requires_explicit_path(self) -> None:
+        with patch.dict(os.environ, {"TERMINAL_ENV": "ssh", "TERMINAL_CWD": "~"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "explicit project root"):
+                self.service.execute("status", root=None)
 
 
 if __name__ == "__main__":

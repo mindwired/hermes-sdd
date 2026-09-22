@@ -6,6 +6,11 @@ Project-local `.sdd/` files are the source of truth. They are deliberately plain
 humans, Git, agents, scripts, and alternate UIs can inspect them without a service. The registry database under
 `$HERMES_HOME` only remembers which repository paths visual clients should list.
 
+Canonical JSON documents must contain an object at the top level, and collection fields must retain their documented
+list shape. Required project metadata fields (`name`, `mode`, and `status`) and milestone/plan files must be present. Malformed JSON, malformed JSONL records, or symlinks anywhere below
+`.sdd/` are integrity errors; the plugin refuses to read or write through them instead of silently defaulting or
+following links outside the project.
+
 ## Top-level files
 
 ### `project.json`
@@ -49,9 +54,9 @@ whole-plan or targeted updates from overwriting concurrent work.
 
 ## Evidence
 
-Evidence records are immutable JSON files under `.sdd/evidence/`. Typical fields include type, task/milestone,
-command, result, `passed`, details, artifact paths, and timestamp. Manual completion evidence may be recorded as
-failed/insufficient; it does not automatically satisfy program/high-risk verification gates.
+Evidence records are immutable JSONL entries under `.sdd/milestones/<id>/evidence.jsonl`. Typical fields include
+type, task/milestone, command, result, `passed`, details, artifact paths, and timestamp. Manual completion evidence
+may be recorded as failed/insufficient; it does not automatically satisfy program/high-risk verification gates.
 
 ## Checkpoints
 
@@ -70,3 +75,9 @@ not copy excluded content into `.sdd`.
 Read-modify-write mutations acquire a project metadata lock before reading the relevant plan/state. Writes use a
 temporary file and atomic replacement. This prevents independent workers from silently losing each other's task
 status updates. Lock files are implementation details and are not authoritative state.
+
+Stale-lock recovery checks the recorded process ID before reclaiming an old lock. A lock whose owner is still alive
+is allowed to time out rather than being removed underneath a concurrent writer; locks from dead processes can be
+reclaimed. Forced reinitialization validates the replacement specification before moving the existing `.sdd/` tree
+to its backup and restores it if initial rendering fails, so invalid input or rendering errors cannot displace a usable project. Remote terminal backends require callers to supply
+an explicit project root because a host or container working directory may not identify the same project.

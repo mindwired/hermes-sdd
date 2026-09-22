@@ -7,8 +7,8 @@ SDD_SCHEMA = {
         "multi-session work: initialize, store requirements/architecture, plan milestones, "
         "select dependency-safe work, update task state, record evidence/decisions, build "
         "bounded context packs, validate traceability, and manage UI source paths. For exact "
-        "payloads load the plugin:sdd-start, plugin:sdd-plan, plugin:sdd-execute, or "
-        "plugin:sdd-verify skill. Do not use for trivial one-turn edits."
+        "payloads load the sdd:sdd-start, sdd:sdd-plan, sdd:sdd-execute, or "
+        "sdd:sdd-verify skill. Do not use for trivial one-turn edits."
     ),
     "parameters": {
         "type": "object",

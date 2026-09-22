@@ -16,6 +16,7 @@ from .storage import (
     append_jsonl,
     atomic_write_json,
     atomic_write_text,
+    ensure_no_symlinks,
     project_lock,
     project_transaction,
     read_json,
@@ -38,14 +39,25 @@ _DECISION_ID_RE = re.compile(r"^ADR-\d{4,}$")
 def _list(value: Any) -> list[Any]:
     if value is None:
         return []
-    return value if isinstance(value, list) else [value]
+    if not isinstance(value, list):
+        raise ValueError("Expected a list")
+    return value
 
 
 def _string_list(value: Any, label: str) -> list[str]:
-    values = _list(value)
+    values = [] if value is None else value
+    if not isinstance(values, list):
+        raise ValueError(f"{label} must be a list of non-empty strings")
     if any(not isinstance(item, str) or not item.strip() for item in values):
         raise ValueError(f"{label} must contain non-empty strings")
     return [item.strip() for item in values]
+
+
+def _decision_list(value: Any, label: str = "decision ids") -> list[str]:
+    values = [] if value is None else value
+    if not isinstance(values, list):
+        raise ValueError(f"{label} must be a list of ADR identifiers")
+    return [_decision_id(item) for item in values]
 
 
 def _decision_id(value: Any) -> str:
@@ -163,12 +175,62 @@ class SDDService:
         sdd = self._sdd(root)
         if sdd.is_symlink():
             raise ValueError(f"Refusing symlinked SDD directory: {sdd}")
-        if not (sdd / "project.json").exists():
+        if not sdd.is_dir() or not (sdd / "project.json").is_file():
             raise ValueError(f"No SDD project at {root}; run operation=init first")
+        ensure_no_symlinks(sdd)
+        for filename in (
+            "project.json",
+            "config.json",
+            "state.json",
+            "requirements.json",
+            "roadmap.json",
+            "architecture.md",
+            "events.jsonl",
+        ):
+            if not (sdd / filename).is_file():
+                raise ValueError(f"Missing required SDD file: {sdd / filename}")
         for name in ("milestones", "decisions", "checkpoints", ".locks", "cache"):
             if (sdd / name).is_symlink():
                 raise ValueError(f"Refusing symlinked SDD subdirectory: {sdd / name}")
         return sdd
+
+    @staticmethod
+    def _read_required_json_path(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError(f"Missing required SDD file: {path}")
+        value = read_json(path)
+        if not isinstance(value, dict):
+            raise ValueError(f"Malformed SDD JSON object at {path}: expected a JSON object")
+        return value
+
+    @classmethod
+    def _read_project(cls, sdd: Path) -> dict[str, Any]:
+        project = cls._read_required_json(sdd, "project.json")
+        if not project.get("name") or not project.get("mode") or not project.get("status"):
+            raise ValueError(
+                f"Malformed SDD project.json at {sdd / 'project.json'}: required fields missing"
+            )
+        return project
+
+    @classmethod
+    def _read_required_json(cls, sdd: Path, filename: str) -> dict[str, Any]:
+        return cls._read_required_json_path(sdd / filename)
+
+    @staticmethod
+    def _require_list_field(document: dict[str, Any], key: str, label: str) -> list[Any]:
+        value = document.get(key, [])
+        if not isinstance(value, list):
+            raise ValueError(f"{label} must be a list")
+        return value
+
+    @classmethod
+    def _require_object_list(
+        cls, document: dict[str, Any], key: str, label: str
+    ) -> list[dict[str, Any]]:
+        values = cls._require_list_field(document, key, label)
+        if any(not isinstance(item, dict) for item in values):
+            raise ValueError(f"{label} must contain objects")
+        return values
 
     @staticmethod
     def _event(sdd: Path, kind: str, **data: Any) -> None:
@@ -184,13 +246,12 @@ class SDDService:
             raise ValueError(
                 f"Refusing symlinked SDD directory: {sdd}; use force only to replace the link"
             )
-        if (sdd / "project.json").exists() and not options.get("force"):
+        if sdd.exists() and not options.get("force") and not (sdd / "project.json").is_file():
+            raise ValueError(
+                f"SDD state at {sdd} is incomplete or malformed; use force to replace it"
+            )
+        if (sdd / "project.json").is_file() and not options.get("force"):
             return {"ok": True, "created": False, "status": self.status(str(project_root), {}, {})}
-        if (sdd.exists() or sdd.is_symlink()) and options.get("force"):
-            stamp = utc_now().replace("+00:00", "Z").replace(":", "").replace("T", "-")
-            backup = project_root / f".sdd.backup-{stamp}-{uuid.uuid4().hex[:6]}"
-            sdd.rename(backup)
-            backup_path = str(backup)
 
         requested_mode = str(payload.get("mode") or "auto").lower()
         if requested_mode not in _MODES:
@@ -205,10 +266,10 @@ class SDDService:
             "summary": payload.get("summary") or "",
             "mode": mode,
             "complexity_score": score,
-            "success_criteria": _list(payload.get("success_criteria")),
-            "constraints": _list(payload.get("constraints")),
-            "non_goals": _list(payload.get("non_goals")),
-            "principles": _list(payload.get("principles")),
+            "success_criteria": _string_list(payload.get("success_criteria"), "success criteria"),
+            "constraints": _string_list(payload.get("constraints"), "constraints"),
+            "non_goals": _string_list(payload.get("non_goals"), "non-goals"),
+            "principles": _string_list(payload.get("principles"), "principles"),
             "status": "active",
             "created_at": now,
             "updated_at": now,
@@ -240,21 +301,52 @@ class SDDService:
             "last_checkpoint": None,
             "updated_at": now,
         }
+        previous_sdd = None
+        if (sdd.exists() or sdd.is_symlink()) and options.get("force"):
+            stamp = utc_now().replace("+00:00", "Z").replace(":", "").replace("T", "-")
+            backup = project_root / f".sdd.backup-{stamp}-{uuid.uuid4().hex[:6]}"
+            sdd.rename(backup)
+            backup_path = str(backup)
+            previous_sdd = backup
         sdd.mkdir(parents=True, exist_ok=True)
-        for directory in ("milestones", "decisions", "checkpoints", "research", ".locks", "cache"):
-            (sdd / directory).mkdir(parents=True, exist_ok=True)
-        atomic_write_text(sdd / ".gitignore", ".locks/\ncache/\n")
-        atomic_write_json(sdd / "project.json", project)
-        atomic_write_json(sdd / "config.json", config)
-        atomic_write_json(sdd / "state.json", state)
-        atomic_write_json(sdd / "requirements.json", {"schema_version": 1, "requirements": []})
-        atomic_write_json(sdd / "roadmap.json", {"schema_version": 1, "milestones": []})
-        atomic_write_text(sdd / "architecture.md", "# Architecture\n\nNot established yet.\n")
-        atomic_write_text(sdd / "events.jsonl", "")
-        self._event(sdd, "project_initialized", mode=mode, complexity_score=score)
-        render_all(project_root)
-        render_decision_index(project_root)
-        source = self.registry.register(str(project_root), str(project.get("name")))
+        try:
+            for directory in (
+                "milestones",
+                "decisions",
+                "checkpoints",
+                "research",
+                ".locks",
+                "cache",
+            ):
+                (sdd / directory).mkdir(parents=True, exist_ok=True)
+            atomic_write_text(sdd / ".gitignore", ".locks/\ncache/\n")
+            atomic_write_json(sdd / "project.json", project)
+            atomic_write_json(sdd / "config.json", config)
+            atomic_write_json(sdd / "state.json", state)
+            atomic_write_json(sdd / "requirements.json", {"schema_version": 1, "requirements": []})
+            atomic_write_json(sdd / "roadmap.json", {"schema_version": 1, "milestones": []})
+            atomic_write_text(sdd / "architecture.md", "# Architecture\n\nNot established yet.\n")
+            atomic_write_text(sdd / "events.jsonl", "")
+            self._event(sdd, "project_initialized", mode=mode, complexity_score=score)
+            render_all(project_root)
+            render_decision_index(project_root)
+        except Exception:
+            if sdd.exists():
+                import shutil
+
+                shutil.rmtree(sdd)
+            if previous_sdd is not None and previous_sdd.exists():
+                previous_sdd.rename(sdd)
+                backup_path = None
+            raise
+        source = None
+        source_warning = None
+        try:
+            source = self.registry.register(str(project_root), str(project.get("name")))
+        except Exception as exc:
+            # The registry is a disposable UI projection. Canonical project state
+            # must remain usable when its SQLite database is unavailable.
+            source_warning = f"Source registry unavailable: {type(exc).__name__}: {exc}"
         return {
             "ok": True,
             "created": True,
@@ -262,6 +354,7 @@ class SDDService:
             "mode": mode,
             "complexity_score": score,
             "source": source,
+            "source_warning": source_warning,
             "backup": backup_path,
             "next": "Capture goals/requirements, then create a milestone and plan only the first meaningful slice.",
         }
@@ -301,12 +394,12 @@ class SDDService:
                 updates["exclude_patterns"], "exclude patterns"
             )
         with project_lock(sdd), project_transaction(sdd):
-            config = read_json(sdd / "config.json", {}) or {}
+            config = self._read_required_json(sdd, "config.json")
             config.update(updates)
             config["updated_at"] = utc_now()
             atomic_write_json(sdd / "config.json", config)
             if "mode" in updates:
-                project = read_json(sdd / "project.json", {}) or {}
+                project = self._read_project(sdd)
                 project["mode"] = updates["mode"]
                 project["updated_at"] = utc_now()
                 atomic_write_json(sdd / "project.json", project)
@@ -320,7 +413,7 @@ class SDDService:
         project_root = self._root(root)
         sdd = self._require(project_root)
         with project_lock(sdd), project_transaction(sdd):
-            project = read_json(sdd / "project.json", {}) or {}
+            project = self._read_project(sdd)
             for key in (
                 "name",
                 "goal",
@@ -333,22 +426,26 @@ class SDDService:
             ):
                 if key in payload:
                     project[key] = (
-                        _list(payload[key])
+                        _string_list(payload[key], key.replace("_", " "))
                         if key in {"success_criteria", "constraints", "non_goals", "principles"}
                         else payload[key]
                     )
             project["updated_at"] = utc_now()
             atomic_write_json(sdd / "project.json", project)
 
-            requirements_doc = read_json(sdd / "requirements.json", {"requirements": []}) or {
-                "requirements": []
-            }
-            existing = {item.get("id"): item for item in requirements_doc.get("requirements", [])}
+            requirements_doc = self._read_required_json(sdd, "requirements.json")
+            requirement_rows = self._require_object_list(
+                requirements_doc, "requirements", "requirements"
+            )
+            raw_requirements = payload.get("requirements", [])
+            if not isinstance(raw_requirements, list):
+                raise ValueError("requirements must be a list")
+            if any(not isinstance(item, dict) for item in raw_requirements):
+                raise ValueError("requirements must contain objects")
+            existing = {item.get("id"): item for item in requirement_rows}
             existing_ids = [key for key in existing if key]
             changed: list[str] = []
-            for raw in _list(payload.get("requirements")):
-                if not isinstance(raw, dict):
-                    continue
+            for raw in raw_requirements:
                 req_id = raw.get("id") or _next_numeric_id(existing_ids, "REQ-", 3)
                 req_id = validate_id(req_id, "requirement id")
                 item = existing.get(req_id, {"id": req_id, "created_at": utc_now()})
@@ -400,8 +497,8 @@ class SDDService:
         project_root = self._root(root)
         sdd = self._require(project_root)
         with project_lock(sdd), project_transaction(sdd):
-            roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
-            milestones = roadmap.get("milestones", [])
+            roadmap = self._read_required_json(sdd, "roadmap.json")
+            milestones = self._require_object_list(roadmap, "milestones", "milestones")
             milestone_id = validate_id(
                 payload.get("id")
                 or _next_numeric_id([m.get("id", "") for m in milestones], "M", 3),
@@ -422,7 +519,7 @@ class SDDService:
                 "status": milestone_status,
                 "risk": risk,
                 "requirement_ids": _string_list(payload.get("requirement_ids"), "requirement ids"),
-                "decision_ids": [_decision_id(item) for item in _list(payload.get("decision_ids"))],
+                "decision_ids": _decision_list(payload.get("decision_ids")),
                 "exit_criteria": _string_list(payload.get("exit_criteria"), "exit criteria"),
                 "interfaces_stable": bool(payload.get("interfaces_stable", False)),
                 "created_at": utc_now(),
@@ -447,12 +544,12 @@ class SDDService:
             atomic_write_text(
                 milestone_dir / "summary.md", "# Milestone summary\n\nNot completed yet.\n"
             )
-            project = read_json(sdd / "project.json", {}) or {}
+            project = self._read_project(sdd)
             if project.get("status") == "complete":
                 project["status"] = "active"
                 project["updated_at"] = utc_now()
                 atomic_write_json(sdd / "project.json", project)
-            state = read_json(sdd / "state.json", {}) or {}
+            state = self._read_required_json(sdd, "state.json")
             if options.get("activate") is True or not state.get("active_milestone"):
                 state["active_milestone"] = milestone_id
                 state["status"] = "planning"
@@ -484,7 +581,7 @@ class SDDService:
             for key in list_fields:
                 if key in payload:
                     if key == "decision_ids":
-                        milestone[key] = [_decision_id(item) for item in _list(payload[key])]
+                        milestone[key] = _decision_list(payload[key])
                     elif key == "requirement_ids":
                         milestone[key] = _string_list(payload[key], "requirement ids")
                     else:
@@ -497,7 +594,7 @@ class SDDService:
                 )
             self._sync_roadmap_milestone(sdd, milestone)
             if options.get("activate"):
-                state = read_json(sdd / "state.json", {}) or {}
+                state = self._read_required_json(sdd, "state.json")
                 state["active_milestone"] = milestone_id
                 state["status"] = (
                     "planning"
@@ -513,15 +610,14 @@ class SDDService:
     def _milestone(
         self, sdd: Path, milestone_id: str | None
     ) -> tuple[str, Path, dict[str, Any], dict[str, Any]]:
-        state = read_json(sdd / "state.json", {}) or {}
+        state = self._read_required_json(sdd, "state.json")
         milestone_id = validate_id(
             milestone_id or state.get("active_milestone") or "", "milestone id"
         )
         milestone_dir = sdd / "milestones" / milestone_id
-        milestone = read_json(milestone_dir / "milestone.json")
-        if not milestone:
-            raise ValueError(f"Unknown milestone: {milestone_id}")
-        plan = read_json(milestone_dir / "plan.json", {"tasks": []}) or {"tasks": []}
+        milestone = self._read_required_json_path(milestone_dir / "milestone.json")
+        plan = self._read_required_json_path(milestone_dir / "plan.json")
+        self._require_object_list(plan, "tasks", "plan tasks")
         return milestone_id, milestone_dir, milestone, plan
 
     def set_plan(
@@ -529,20 +625,23 @@ class SDDService:
     ) -> dict[str, Any]:
         project_root = self._root(root)
         sdd = self._require(project_root)
-        raw_tasks = _list(payload.get("tasks"))
+        raw_tasks = payload.get("tasks")
+        if not isinstance(raw_tasks, list):
+            raise ValueError("set_plan requires payload.tasks to be a list")
         if not raw_tasks:
             raise ValueError("set_plan requires payload.tasks")
         with project_lock(sdd), project_transaction(sdd):
             milestone_id, milestone_dir, milestone, old_plan = self._milestone(
                 sdd, payload.get("milestone_id")
             )
-            if any(
-                task.get("status") == "in_progress" for task in old_plan.get("tasks", [])
-            ) and not options.get("force"):
+            old_tasks = self._require_object_list(old_plan, "tasks", "plan tasks")
+            if any(task.get("status") == "in_progress" for task in old_tasks) and not options.get(
+                "force"
+            ):
                 raise ValueError(
                     "Cannot replace a plan while tasks are in progress; reconcile them or use options.force"
                 )
-            existing_by_id = {task.get("id"): task for task in old_plan.get("tasks", [])}
+            existing_by_id = {task.get("id"): task for task in old_tasks}
             tasks: list[dict[str, Any]] = []
             ids: list[str] = []
             for index, raw in enumerate(raw_tasks, start=1):
@@ -583,13 +682,20 @@ class SDDService:
                     "kind": raw["kind"]
                     if "kind" in raw
                     else previous.get("kind", "implementation"),
-                    "depends_on": _list(raw.get("depends_on", previous.get("depends_on", []))),
-                    "acceptance": _list(raw.get("acceptance", previous.get("acceptance", []))),
-                    "file_scope": _list(raw.get("file_scope", previous.get("file_scope", []))),
-                    "requirement_ids": _list(
-                        raw.get("requirement_ids", previous.get("requirement_ids", []))
+                    "depends_on": _string_list(
+                        raw.get("depends_on", previous.get("depends_on", [])), "task dependencies"
                     ),
-                    "decision_ids": _list(
+                    "acceptance": _string_list(
+                        raw.get("acceptance", previous.get("acceptance", [])), "task acceptance"
+                    ),
+                    "file_scope": _string_list(
+                        raw.get("file_scope", previous.get("file_scope", [])), "task file scope"
+                    ),
+                    "requirement_ids": _string_list(
+                        raw.get("requirement_ids", previous.get("requirement_ids", [])),
+                        "task requirement ids",
+                    ),
+                    "decision_ids": _decision_list(
                         raw.get("decision_ids", previous.get("decision_ids", []))
                     ),
                     "agent_role": raw["agent_role"]
@@ -623,7 +729,7 @@ class SDDService:
             milestone["updated_at"] = utc_now()
             atomic_write_json(milestone_dir / "milestone.json", milestone)
             self._sync_roadmap_milestone(sdd, milestone)
-            state = read_json(sdd / "state.json", {}) or {}
+            state = self._read_required_json(sdd, "state.json")
             state.update(
                 {"active_milestone": milestone_id, "status": "ready", "updated_at": utc_now()}
             )
@@ -646,11 +752,9 @@ class SDDService:
 
     @staticmethod
     def _sync_roadmap_milestone(sdd: Path, milestone: dict[str, Any]) -> None:
-        roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
-        rows = [
-            milestone if item.get("id") == milestone.get("id") else item
-            for item in roadmap.get("milestones", [])
-        ]
+        roadmap = SDDService._read_required_json(sdd, "roadmap.json")
+        rows = SDDService._require_object_list(roadmap, "milestones", "milestones")
+        rows = [milestone if item.get("id") == milestone.get("id") else item for item in rows]
         if not any(item.get("id") == milestone.get("id") for item in rows):
             rows.append(milestone)
         roadmap["milestones"] = rows
@@ -680,7 +784,7 @@ class SDDService:
             key=lambda task: (task.get("priority") != "high", task.get("id")),
         )
         active = [task for task in all_tasks if task.get("status") == "in_progress"]
-        config = read_json(sdd / "config.json", {}) or {}
+        config = self._read_required_json(sdd, "config.json")
         limit = max(1, min(int(options.get("limit") or config.get("max_parallel") or 4), 12))
         allow_parallel = bool(options.get("allow_parallel", True))
         if not milestone.get("interfaces_stable") and any(
@@ -741,8 +845,9 @@ class SDDService:
     def _locate_task(
         self, sdd: Path, task_id: str
     ) -> tuple[str, Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
-        roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
-        for item in roadmap.get("milestones", []):
+        roadmap = self._read_required_json(sdd, "roadmap.json")
+        milestones = self._require_object_list(roadmap, "milestones", "milestones")
+        for item in milestones:
             milestone_id = str(item.get("id") or "")
             if not milestone_id:
                 continue
@@ -807,7 +912,10 @@ class SDDService:
                     candidate[key] = value
             for key in list_fields:
                 if key in payload:
-                    candidate[key] = _list(payload[key])
+                    if key == "decision_ids":
+                        candidate[key] = _decision_list(payload[key])
+                    else:
+                        candidate[key] = _string_list(payload[key], f"task {key}")
             if (
                 "file_scope" in payload
                 and task.get("status") == "in_progress"
@@ -883,7 +991,7 @@ class SDDService:
                 if not isinstance(payload["evidence"], dict):
                     raise ValueError("Evidence must be an object")
                 self._validate_evidence_payload(task, payload["evidence"], task_id=task_id)
-            state = read_json(sdd / "state.json", {}) or {}
+            state = self._read_required_json(sdd, "state.json")
             if (
                 new_status == "in_progress"
                 and old_status != "in_progress"
@@ -1120,7 +1228,7 @@ class SDDService:
                 raise ValueError(
                     f"Plan revision changed: expected {expected_revision}, current {plan.get('revision', 0)}"
                 )
-            state = read_json(sdd / "state.json", {}) or {}
+            state = self._read_required_json(sdd, "state.json")
             if (
                 state.get("active_milestone")
                 and state.get("active_milestone") != milestone_id
@@ -1170,7 +1278,7 @@ class SDDService:
                 f"# {milestone_id} summary\n\n{summary}\n",
             )
             self._sync_roadmap_milestone(sdd, milestone)
-            roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
+            roadmap = self._read_required_json(sdd, "roadmap.json")
             remaining = [
                 item
                 for item in roadmap.get("milestones", [])
@@ -1188,7 +1296,7 @@ class SDDService:
             )
             state["updated_at"] = utc_now()
             atomic_write_json(sdd / "state.json", state)
-            project = read_json(sdd / "project.json", {}) or {}
+            project = self._read_project(sdd)
             if not remaining:
                 project["status"] = "complete"
                 project["updated_at"] = utc_now()
@@ -1232,14 +1340,17 @@ class SDDService:
                 "decision": payload.get("decision")
                 if "decision" in payload
                 else previous.get("decision", ""),
-                "alternatives": _list(
-                    payload.get("alternatives", previous.get("alternatives", []))
+                "alternatives": _string_list(
+                    payload.get("alternatives", previous.get("alternatives", [])),
+                    "decision alternatives",
                 ),
-                "consequences": _list(
-                    payload.get("consequences", previous.get("consequences", []))
+                "consequences": _string_list(
+                    payload.get("consequences", previous.get("consequences", [])),
+                    "decision consequences",
                 ),
-                "requirement_ids": _list(
-                    payload.get("requirement_ids", previous.get("requirement_ids", []))
+                "requirement_ids": _string_list(
+                    payload.get("requirement_ids", previous.get("requirement_ids", [])),
+                    "decision requirement ids",
                 ),
                 "created_at": previous.get("created_at") or payload.get("created_at") or utc_now(),
                 "updated_at": utc_now(),
@@ -1258,7 +1369,7 @@ class SDDService:
     ) -> dict[str, Any]:
         project_root = self._root(root)
         sdd = self._require(project_root)
-        config = read_json(sdd / "config.json", {}) or {}
+        config = self._read_required_json(sdd, "config.json")
         budget = int(options.get("budget_tokens") or config.get("context_budget_tokens") or 12000)
         task_id = target or payload.get("task_id")
         milestone_id = payload.get("milestone_id")
@@ -1286,7 +1397,7 @@ class SDDService:
             _, _, _, _, task = self._locate_task(sdd, validate_id(payload["task_id"], "task id"))
         with project_lock(sdd), project_transaction(sdd):
             snapshot = create_checkpoint(project_root, target or payload.get("id"), task)
-            state = read_json(sdd / "state.json", {}) or {}
+            state = self._read_required_json(sdd, "state.json")
             state["last_checkpoint"] = snapshot["id"]
             state["updated_at"] = utc_now()
             atomic_write_json(sdd / "state.json", state)
@@ -1317,18 +1428,16 @@ class SDDService:
     ) -> dict[str, Any]:
         project_root = self._root(root)
         sdd = self._require(project_root)
-        project = read_json(sdd / "project.json", {}) or {}
-        config = read_json(sdd / "config.json", {}) or {}
-        state = read_json(sdd / "state.json", {}) or {}
-        requirements = read_json(sdd / "requirements.json", {"requirements": []}) or {
-            "requirements": []
-        }
-        roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
-        requirement_rows = requirements.get("requirements", [])
-        req_ids = {item.get("id") for item in requirement_rows if item.get("id")}
+        project = self._read_project(sdd)
+        config = self._read_required_json(sdd, "config.json")
+        state = self._read_required_json(sdd, "state.json")
+        requirements = self._read_required_json(sdd, "requirements.json")
+        requirement_rows = self._require_object_list(requirements, "requirements", "requirements")
+        roadmap = self._read_required_json(sdd, "roadmap.json")
+        req_ids = {str(item["id"]) for item in requirement_rows if item.get("id")}
         decision_ids = {path.stem for path in (sdd / "decisions").glob("*.json")}
-        milestone_rows = roadmap.get("milestones", [])
-        milestone_ids = {item.get("id") for item in milestone_rows if item.get("id")}
+        milestone_rows = self._require_object_list(roadmap, "milestones", "milestones")
+        milestone_ids = {str(item["id"]) for item in milestone_rows if item.get("id")}
         findings: list[dict[str, Any]] = []
 
         def add(severity: str, code: str, message: str, target: str | None = None) -> None:
@@ -1338,7 +1447,7 @@ class SDDService:
                 _compact({"severity": severity, "code": code, "message": message, "target": target})
             )
 
-        requirement_id_list = [item.get("id") for item in requirement_rows if item.get("id")]
+        requirement_id_list = [str(item["id"]) for item in requirement_rows if item.get("id")]
         for duplicate in sorted(
             {item for item in requirement_id_list if requirement_id_list.count(item) > 1}
         ):
@@ -1348,7 +1457,7 @@ class SDDService:
                 f"Duplicate requirement id {duplicate}",
                 duplicate,
             )
-        milestone_id_list = [item.get("id") for item in milestone_rows if item.get("id")]
+        milestone_id_list = [str(item["id"]) for item in milestone_rows if item.get("id")]
         for duplicate in sorted(
             {item for item in milestone_id_list if milestone_id_list.count(item) > 1}
         ):
@@ -1396,7 +1505,7 @@ class SDDService:
         linked_requirements: set[str] = set()
         all_tasks: dict[str, dict[str, Any]] = {}
         for milestone in milestone_rows:
-            milestone_id = milestone.get("id")
+            milestone_id = str(milestone["id"]) if milestone.get("id") else None
             linked_requirements.update(map(str, milestone.get("requirement_ids", [])))
             milestone_file = read_json(sdd / "milestones" / str(milestone_id) / "milestone.json")
             if not milestone_file:
@@ -1439,9 +1548,10 @@ class SDDService:
                     "Milestone has no exit criteria",
                     milestone_id,
                 )
-            plan = read_json(
-                sdd / "milestones" / str(milestone_id) / "plan.json", {"tasks": []}
-            ) or {"tasks": []}
+            plan = self._read_required_json_path(
+                sdd / "milestones" / str(milestone_id) / "plan.json"
+            )
+            tasks = self._require_object_list(plan, "tasks", "plan tasks")
             if plan.get("milestone_id") not in (None, milestone_id):
                 add(
                     "error",
@@ -1456,12 +1566,12 @@ class SDDService:
                     "Plan revision must be a non-negative integer",
                     milestone_id,
                 )
-            task_id_list = [item.get("id") for item in plan.get("tasks", []) if item.get("id")]
+            task_id_list = [str(item["id"]) for item in tasks if item.get("id")]
             for duplicate in sorted(
                 {item for item in task_id_list if task_id_list.count(item) > 1}
             ):
                 add("error", "task.duplicate_id", f"Duplicate task id {duplicate}", duplicate)
-            dag_errors = _validate_dag(plan.get("tasks", []))
+            dag_errors = _validate_dag(tasks)
             for error in dag_errors:
                 add("error", "plan.invalid_dag", error, milestone_id)
             evidence = read_jsonl(sdd / "milestones" / str(milestone_id) / "evidence.jsonl")
@@ -1469,7 +1579,7 @@ class SDDService:
             successful_evidence_by_task = Counter(
                 item.get("task_id") for item in evidence if item.get("passed") is True
             )
-            for task in plan.get("tasks", []):
+            for task in tasks:
                 task_id = task.get("id")
                 if task_id:
                     if task_id in all_tasks:
@@ -1634,17 +1744,19 @@ class SDDService:
     ) -> dict[str, Any]:
         project_root = self._root(root)
         sdd = self._require(project_root)
-        project = read_json(sdd / "project.json", {}) or {}
-        state = read_json(sdd / "state.json", {}) or {}
-        roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
+        project = self._read_project(sdd)
+        state = self._read_required_json(sdd, "state.json")
+        roadmap = self._read_required_json(sdd, "roadmap.json")
+        milestone_rows = self._require_object_list(roadmap, "milestones", "milestones")
         counts: Counter[str] = Counter()
         active = None
         active_plan = {"tasks": []}
-        for milestone in roadmap.get("milestones", []):
-            plan = read_json(
-                sdd / "milestones" / str(milestone.get("id")) / "plan.json", {"tasks": []}
-            ) or {"tasks": []}
-            counts.update(task.get("status", "pending") for task in plan.get("tasks", []))
+        for milestone in milestone_rows:
+            plan = self._read_required_json_path(
+                sdd / "milestones" / str(milestone.get("id")) / "plan.json"
+            )
+            tasks = self._require_object_list(plan, "tasks", "plan tasks")
+            counts.update(task.get("status", "pending") for task in tasks)
             if milestone.get("id") == state.get("active_milestone"):
                 active = milestone
                 active_plan = plan
@@ -1661,7 +1773,7 @@ class SDDService:
                 key: project.get(key) for key in ("name", "goal", "summary", "mode", "status")
             },
             "state": state,
-            "milestone_count": len(roadmap.get("milestones", [])),
+            "milestone_count": len(milestone_rows),
             "task_counts": dict(counts),
             "active_milestone": active,
             "active_tasks": [_compact(task) for task in active_plan.get("tasks", [])],
@@ -1702,14 +1814,14 @@ class SDDService:
         project_root = self._root(root)
         status = self.status(str(project_root), {}, {"limit": 6})
         sdd = self._require(project_root)
-        roadmap = read_json(sdd / "roadmap.json", {"milestones": []}) or {"milestones": []}
-        requirements = read_json(sdd / "requirements.json", {"requirements": []}) or {
-            "requirements": []
-        }
+        roadmap = self._read_required_json(sdd, "roadmap.json")
+        requirements = self._read_required_json(sdd, "requirements.json")
+        requirement_rows = self._require_object_list(requirements, "requirements", "requirements")
+        milestones = self._require_object_list(roadmap, "milestones", "milestones")
         return {
             **status,
-            "roadmap": roadmap.get("milestones", []),
-            "requirements": requirements.get("requirements", []),
+            "roadmap": milestones,
+            "requirements": requirement_rows,
         }
 
     def execute(

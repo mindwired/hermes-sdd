@@ -25,6 +25,12 @@ class RepositoryContractTest(unittest.TestCase):
             run = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
 
+    def test_dev_installer_keeps_backups_outside_plugin_discovery_root(self) -> None:
+        script = (ROOT / "scripts" / "install-dev.sh").read_text(encoding="utf-8")
+        self.assertIn('BACKUP_ROOT="$HERMES_HOME/plugin-backups/sdd"', script)
+        self.assertIn('$(basename "$target").backup-$STAMP', script)
+        self.assertNotIn('mv "$target" "$target.backup-$STAMP"', script)
+
 
 if __name__ == "__main__":
     unittest.main()
