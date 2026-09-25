@@ -2,7 +2,7 @@
 
 **Status:** SDD implementation commit `bd1018f` is pushed (116 tests and pinned Dashboard API tests pass); report-only follow-ups are pushed and `main` is clean/synchronized. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is pushed; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Separate limitations: GUI rendering/accessibility/clipboard acceptance and historical validation findings in consumer `.sdd/`; gateway messaging/HA adapters are disabled by profile policy and outside the pin scope.
 **Repository:** `/home/felipe.arantes/Projects/hermes-sdd`
-**Branch:** `main` at `7cb26cbee8fa49247660dc38eca165ab2543e917`; clean and synchronized with `origin/main`. Implementation commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` is pushed.
+**Branch:** `main` at `44b2c84786cb50980ec36d13e9ccf7c86561a4a2`; clean and synchronized with `origin/main`. Implementation commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` is pushed.
 **Purpose:** Evidence-backed review of Hermes SDD's real-world usefulness, safety/integrity, product surfaces, and release readiness. Findings distinguish observed defects from design risks and product hypotheses.
 
 > This report covers the current local working tree only. It is not evidence that graphical host integration or any future published release has been deployed or verified.
