@@ -1,6 +1,6 @@
 # Hermes SDD Deep Review — Final Review Report
 
-**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). Final review closeouts are pushed at `3d712ac`, `699219f`, `89ae1e5`, and `d19c526`. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Remaining separate limitations: GUI rendering/accessibility/clipboard acceptance and historical validation findings in consumer `.sdd/`; gateway messaging/HA adapters are disabled by profile policy and out of scope.
+**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). Final review closeouts are pushed through `ece6426`. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Remaining separate limitations: GUI rendering/accessibility/clipboard acceptance and historical validation findings in consumer `.sdd/`; gateway messaging/HA adapters are disabled by profile policy and out of scope.
 **Repository:** `/home/felipe.arantes/Projects/hermes-sdd`
 **Branch:** `main` at pushed commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c`
 **Purpose:** Evidence-backed review of Hermes SDD's real-world usefulness, safety/integrity, product surfaces, and release readiness. Findings distinguish observed defects from design risks and product hypotheses.
@@ -17,7 +17,7 @@ The application static scan labeled ordinary test/CI subprocess use and test pat
 
 **Release recommendation:** source implementation is pushed, verified, and the exact revision passes disposable-profile install/runtime smoke. A tracked-source archive build passed. GUI acceptance for Dashboard/Desktop is not verified. Gateway adapters remain intentionally disabled, outside the plugin-pin scope.
 
-**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits through `aa4cb59` are pushed. Source review closeouts through `d19c526` are pushed. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
+**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits through `aa4cb59` are pushed. Source report corrections are pushed through `ece6426`. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
 
 ## Scope and method
 
