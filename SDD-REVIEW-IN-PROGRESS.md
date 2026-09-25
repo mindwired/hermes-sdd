@@ -1,6 +1,6 @@
 # Hermes SDD Deep Review — Final Review Report
 
-**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). The final SDD review report is pushed at `95b9c8133495e44c4ab965aacc4b1d5b258e88d4`. The implementation SHA was installed in a disposable Hermes profile and passed doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`, with report closeouts `0d0c62d`, `a854303`, `d6856af`, and `10e605b`; consumer `just check` passed 254 tests. The active profile reconciles to the pinned SDD Git checkout and plugin/SDD doctor pass. The review is complete for the requested source/install scope. GUI-rendering/accessibility/clipboard acceptance and historical consumer `.sdd/` findings remain separate limitations; configured messaging/HA platform plugins remain disabled and are outside the SDD pin.
+**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). The final SDD review report is pushed at `f2472363787b9d1a363c26ab51363d3bc59af2f5`. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Remaining separate limitations: GUI rendering/accessibility/clipboard acceptance, historical validation findings in consumer `.sdd/`, and disabled gateway messaging/HA adapters (outside this install scope).
 **Repository:** `/home/felipe.arantes/Projects/hermes-sdd`
 **Branch:** `main` at pushed commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c`
 **Purpose:** Evidence-backed review of Hermes SDD's real-world usefulness, safety/integrity, product surfaces, and release readiness. Findings distinguish observed defects from design risks and product hypotheses.
@@ -15,11 +15,11 @@ The project retains a useful compact architecture: one Agent tool with progressi
 
 The application static scan labeled ordinary test/CI subprocess use and test paths as caution findings; install was first blocked and then deliberately continued only inside the disposable Hermes home with `--force`. This did not disable scanning globally or alter the active profile. Preserve the distinction between static matches, actual runtime behavior, and GUI acceptance.
 
-**Release recommendation:** source implementation is pushed, verified, and the exact revision passes disposable-profile install/runtime smoke. A tracked-source archive build passed. Graphical Dashboard/Desktop host acceptance remains unverified.
+**Release recommendation:** source implementation is pushed, verified, and the exact revision passes disposable-profile install/runtime smoke. A tracked-source archive build passed. GUI acceptance for Dashboard/Desktop is not verified. Gateway adapters remain intentionally disabled, outside the plugin-pin scope.
 
 **Runtime caveat (not a release blocker for the SDD CLI/Dashboard/Desktop pin):** the gateway restarted and reports active, but platform adapters were not created because Telegram, WhatsApp, and Home Assistant platform plugins are disabled in the active profile. Gateway continues for cron. Those external messaging/HA integrations were not enabled because they are separate, side-effectful capabilities; no live gateway adapter/tool registration is claimed.
 
-**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits `b994aa3` / `0d0c62d` / `a854303` / `d6856af` / `10e605b` are pushed. Source report closeout is pushed in `95b9c81`. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
+**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits through `aa4cb59` are pushed. Source report closeout `f247236` is pushed. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
 
 ## Scope and method
 
