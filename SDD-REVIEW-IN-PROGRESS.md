@@ -1,6 +1,6 @@
 # Hermes SDD Deep Review — Final Review Report
 
-**Status:** SDD code is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c`; 116 tests plus pinned Dashboard API tests pass. The pushed SHA was installed in a disposable Hermes profile and passed doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration was committed/pushed as `b994aa3`, with report closeouts `0d0c62d` and `a854303`; consumer `just check` passed 254 tests and the active profile reads back the SDD pin. The review is substantially complete; the durable GUI-rendering/accessibility/clipboard acceptance gap remains open, as do historical validation findings in the consumer `.sdd/` (outside the install scope). The live gateway has not been restarted; its loaded schemas may predate the pin. No live GUI restart was performed.
+**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). The final SDD review report is pushed in `e8ae6087c23500fd31ef7278c2f86e284234159d`. The implementation SHA was installed in a disposable Hermes profile and passed doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`, with report closeouts `0d0c62d` and `a854303`; consumer `just check` passed 254 tests and the active profile reads back the SDD pin. Remaining gates: durable GUI-rendering/accessibility/clipboard acceptance, historical validation findings in consumer `.sdd/` (outside install scope), and approved live gateway restart/read-back. No live GUI or gateway restart was performed.
 **Repository:** `/home/felipe.arantes/Projects/hermes-sdd`
 **Branch:** `main` at pushed commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c`
 **Purpose:** Evidence-backed review of Hermes SDD's real-world usefulness, safety/integrity, product surfaces, and release readiness. Findings distinguish observed defects from design risks and product hypotheses.
@@ -19,7 +19,7 @@ The application static scan labeled ordinary test/CI subprocess use and test pat
 
 **Runtime caveat:** the managed active profile points at the exact pinned Git revision and both CLI doctor checks pass, but the current long-running gateway has not been restarted; its startup-loaded schemas may predate this pin. Gateway status reports an outdated service definition. Restart only after the owner approves the operational impact.
 
-**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source commit `bd1018f` and consumer commits `b994aa3` / `0d0c62d` / `a854303` are pushed. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
+**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits `b994aa3` / `0d0c62d` / `a854303` are pushed. Report closeout `e8ae608` is pushed. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
 
 ## Scope and method
 
