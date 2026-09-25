@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 
 try:
@@ -66,6 +67,29 @@ class DashboardApiTest(unittest.TestCase):
         response = client.post("/operation", json={"operation": "not-a-real-operation"})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"].split(":", 1)[0], "ValueError")
+
+    @unittest.skipIf(
+        TestClient is None, f"FastAPI/HTTPX test support is not installed: {IMPORT_ERROR}"
+    )
+    def test_unexpected_snapshot_failure_is_generic_server_error(self) -> None:
+        from fastapi import FastAPI
+
+        from hermes_sdd.core import SDDService
+        from hermes_sdd.dashboard_api import create_router
+
+        app = FastAPI()
+        service = SDDService()
+        app.include_router(create_router(service))
+        client = TestClient(app)
+        with patch.object(
+            service, "snapshot", side_effect=RuntimeError("database offline /secret")
+        ):
+            response = client.get("/snapshot", params={"root": "/tmp/example"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "Internal server error")
+        self.assertNotIn("database offline", response.text)
+        self.assertNotIn("/secret", response.text)
 
 
 if __name__ == "__main__":

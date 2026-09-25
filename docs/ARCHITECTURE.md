@@ -97,6 +97,13 @@ The context pack is deterministic and prioritized. It does not call an LLM, embe
 
 A checkpoint hashes authoritative and scoped files. Wildcard scopes are expanded recursively inside the repository with a hard file-count bound; symlinks escaping the repository are ignored. Deltas identify added, removed, and changed files. This lets a new session orient around change rather than reload every historical artifact.
 
+### Bounded status and search
+
+Status is an orientation response, not a project export: it provides counts, target-scoped blocking findings, a
+deterministic recommended action, and a capped active-task preview. Compact mode omits the preview. Detailed
+milestone/task data should be fetched only when selected by `next`, `search`, or a context pack. Search remains a
+literal substring scan today; large-project semantic/indexed search is a future scalability option.
+
 ### Main-session discipline
 
 The main session may implement small work directly. For large work, it should orchestrate and receive compact worker summaries. Worker transcripts are not persisted as project state.
@@ -128,7 +135,7 @@ Validation checks structural consistency:
 - oversized artifacts;
 - missing architecture in deep/program work.
 
-It cannot replace actual tests. `finalize_milestone` requires all tasks to be terminal and rejects structural errors unless explicitly forced.
+It cannot replace actual tests. `finalize_milestone` requires all tasks to be terminal and rejects structural errors unless explicitly forced. The explicit `options.force` escape hatch bypasses active-milestone, empty-plan, incomplete-task, and validation gates, but requires `payload.override_reason` and marks the milestone `overridden` rather than `verified`; the reason is recorded in the summary and event. This is an administrative override, not proof the work is verified. Structured exit criteria use stable milestone-scoped IDs and require successful evidence explicitly linked through a task that also links the criterion. Legacy prose-only milestones must be migrated before verified finalization; the gate validates traceability metadata, not factual truth.
 
 ## Concurrency and durability
 

@@ -97,7 +97,7 @@
 
     function loadSnapshot(chosen, quiet) {
       const current = chosen || root;
-      if (!current) { setSnapshot(null); return Promise.resolve(); }
+      if (!current) { setSnapshot(null); setValidation(null); setEvents([]); return Promise.resolve(); }
       if (!quiet) setBusy(true);
       setError("");
       return api("/snapshot?root=" + encodeURIComponent(current))
@@ -176,7 +176,21 @@
     }
 
     function validateProject() {
-      return operation("validate", null, { record: true }, { detail: "full" }).then(setValidation);
+      setBusy(true);
+      setError("");
+      return api("/operation", {
+        method: "POST",
+        body: {
+          operation: "validate",
+          root: root,
+          target: null,
+          payload: { record: false },
+          options: { detail: "normal" },
+        },
+      })
+        .then(function (result) { setValidation(result); return result; })
+        .catch(function (failure) { setError(errorText(failure)); throw failure; })
+        .finally(function () { setBusy(false); });
     }
 
     function showContext(taskId) {
@@ -209,20 +223,30 @@
       const command = window.prompt("Verification command or evidence artifact:", "");
       const result = window.prompt(
         "Verification result:",
-        command ? "passed" : "completion recorded; verification still required",
+        "",
       );
-      const normalized = (result || "").toLowerCase();
-      const passed = /(^|\b)(pass(ed)?|success(ful)?|verified|ok)(\b|$)/.test(normalized)
-        && !/(fail|error|broken|blocked|regression)/.test(normalized);
+      if (!command && !result) return;
+      if (!window.confirm("Did you actually run or observe this verification successfully? Choose Cancel to record the task as done with verification still pending.")) {
+        return operation("transition", task.id, {
+          status: "done",
+          summary: "Implementation complete; verification pending",
+          evidence: {
+            type: "manual_or_test",
+            command: command || "",
+            result: result || "verification pending",
+            passed: false,
+          },
+        });
+      }
       return operation("transition", task.id, {
         status: "done",
         summary: "Completed from the Hermes SDD Dashboard",
-        evidence: command || result ? {
+        evidence: {
           type: "manual_or_test",
           command: command || "",
           result: result || "",
-          passed: passed,
-        } : null,
+          passed: true,
+        },
       });
     }
 
@@ -235,7 +259,10 @@
       }
       if (task.status === "in_progress") {
         actions.push(h(Button, { key: "block", variant: "outline", onClick: function () { blockTask(task); }, disabled: busy }, "Block"));
-        actions.push(h(Button, { key: "done", onClick: function () { completeTask(task); }, disabled: busy }, "Complete"));
+        actions.push(h(Button, { key: "done", onClick: function () { completeTask(task); }, disabled: busy }, "Implementation complete"));
+      }
+      if (task.status === "done" && (!task.evidence_ids || task.evidence_ids.length === 0)) {
+        actions.push(h(Button, { key: "verify", variant: "outline", onClick: function () { completeTask(task); }, disabled: busy }, "Record verification"));
       }
       if (task.status === "blocked") {
         actions.push(h(Button, { key: "resume", onClick: function () { operation("transition", task.id, { status: "pending", blocked_reason: "" }); }, disabled: busy }, "Return to pending"));
@@ -314,7 +341,7 @@
             ),
             h("div", { className: "sdd-field sdd-field-wide" }, h(Label, null, "Register local repository"), h(Input, { value: newRoot, placeholder: "/path/to/repository", onChange: function (event) { setNewRoot(event.target.value); } })),
             h(Button, { onClick: addSource, disabled: busy || !newRoot.trim() }, "Add"),
-            h(Button, { variant: "outline", onClick: function () { loadSnapshot(); }, disabled: busy || !root }, busy ? "Working…" : "Refresh"),
+            h(Button, { onClick: function () { loadSnapshot(root); }, disabled: busy || !root }, busy ? "Working…" : "Refresh"),
             source ? h(Button, { variant: "outline", onClick: removeSource, disabled: busy }, "Remove source") : null,
           ),
           error ? h("div", { className: "sdd-alert sdd-alert-error" }, error) : null,
@@ -355,6 +382,32 @@
           h(Stat, { label: "Milestones", value: snapshot.milestone_count, detail: snapshot.state && snapshot.state.active_milestone }),
           h(Stat, { label: "Tasks", value: taskTotal, detail: JSON.stringify(counts) }),
         ),
+
+        snapshot.action ? h(
+          Card,
+          null,
+          h(CardContent, { className: "sdd-card-content" },
+            h(SectionTitle, {
+              title: "Recommended next action",
+              detail: snapshot.action.reason,
+            }),
+            h("div", { className: "sdd-muted" }, "Action: " + snapshot.action.kind),
+            snapshot.active_validation && snapshot.active_validation.error_count
+              ? h("div", { className: "sdd-list" }, snapshot.active_validation.findings.map(function (finding, index) {
+                return h("div", { className: "sdd-finding sdd-finding-error", key: finding.code + "-" + index },
+                  h("div", { className: "sdd-title" }, finding.code),
+                  h("div", null, finding.message),
+                  finding.target ? h("div", { className: "sdd-muted" }, finding.target) : null,
+                );
+              }))
+              : null,
+            snapshot.active_task_count > ((snapshot.active_tasks || []).length)
+              ? h("div", { className: "sdd-muted" },
+                "Showing " + (snapshot.active_tasks || []).length + " of " + snapshot.active_task_count + " active-milestone tasks. Use the task list and next safe wave for focused context.",
+              )
+              : null,
+          ),
+        ) : null,
 
         h(
           Card,

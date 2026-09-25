@@ -17,14 +17,17 @@ Use durable state as a hypothesis and the repository as evidence. Never assume a
 1. Call `sdd(operation="status")` and `sdd(operation="validate", payload={"record":false}, options={"detail":"normal"})`.
 2. Inspect `git status`, recent commits, changed files, running processes, test results, and the active milestone plan.
 3. If a checkpoint exists, call `context_delta` to identify which authoritative and scoped files changed since it was created.
-4. Reconcile each `in_progress` task:
+4. Read the active task's linked requirements and exit criteria; do not infer proof from a terminal task state or free-form text.
+5. Reconcile each `in_progress` task:
    - implementation and evidence complete → verify, record evidence, mark done;
    - partial but coherent → keep in progress and update notes/remaining acceptance;
    - no meaningful work → return to pending;
    - impossible pending dependency or conflict → mark blocked with reason.
-5. Detect overlapping worker edits before resuming parallel work. Merge or serialize conflicting scopes.
-6. Refresh only stale artifacts. Preserve valid decisions and requirements; do not regenerate the project specification from scratch.
-7. Request `next` and resume with a fresh context pack.
+6. Detect overlapping worker edits before resuming parallel work. Merge or serialize conflicting scopes.
+7. Refresh only stale artifacts. Preserve valid decisions and requirements; do not regenerate the project specification from scratch.
+8. Request `next` and resume with a fresh context pack.
+
+For each active exit criterion, successful evidence must explicitly include its stable criterion ID, be linked to a non-skipped task in the same milestone, and that task must also link the criterion. Legacy prose-only criteria require explicit migration through `update_milestone` before normal verified finalization; do not infer criterion mappings from similar wording. Forced finalization is an audited `overridden` outcome, never verified completion.
 
 ## Stale-plan rule
 

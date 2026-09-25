@@ -41,13 +41,28 @@ and finalization. Events support recovery and audit but do not override current 
 
 Each `.sdd/milestones/<id>/` contains:
 
-- `milestone.json`: objective, requirement links, exit criteria, dependencies, risk, status, interface stability.
+- `milestone.json`: objective, requirement links, exit criteria, dependencies, risk, status, interface stability,
+  and `exit_criteria_schema_version: 1` with stable `exit_criteria_records` (`id`, `text`, `status`). IDs use
+  `<milestone-id>-EC001`; removed criteria become `retired` and their IDs are never reused. Existing schema-v1
+  milestones without these fields are legacy/unmapped until updated through `update_milestone`.
 - `plan.json`: revisioned task DAG.
 - `PLAN.md`: human rendering of the current plan.
 - `summary.md`: verification/finalization record.
 
 A task includes id, title, objective, status, risk, dependencies, acceptance criteria, conservative file scopes,
-requirement links, evidence ids, notes, summary, and timestamps.
+requirement links, `exit_criteria_ids`, evidence ids, notes, summary, and timestamps. A criterion link must refer to
+an active criterion in the same milestone.
+
+Milestone status `overridden` records an administrative forced finalization. It is not equivalent to `verified`;
+the reason is persisted in the finalization event and summary. A forced finalization with no remaining milestones
+marks project/state status `overridden`, not `complete`.
+Criterion-to-evidence links are explicit: map a criterion to one or more tasks with `exit_criteria_ids`, then
+record successful evidence with the same IDs in `evidence.exit_criteria_ids`. Evidence must belong to a non-skipped
+task that also links that active criterion. Finalization blocks if any active structured criterion lacks such
+evidence. This verifies traceability metadata, not the truth of user-entered evidence claims. Existing milestones
+without structured records receive a warning and cannot be normally finalized until migrated using
+`update_milestone` with `exit_criteria` or explicit `exit_criteria_records`. Updating legacy prose preserves stable
+IDs where criteria are unchanged and retires removed IDs; changing criterion wording creates a new ID.
 
 `plan.json.revision` increments on every task/plan mutation. Callers may pass `expected_revision` to prevent stale
 whole-plan or targeted updates from overwriting concurrent work.
@@ -57,6 +72,15 @@ whole-plan or targeted updates from overwriting concurrent work.
 Evidence records are immutable JSONL entries under `.sdd/milestones/<id>/evidence.jsonl`. Typical fields include
 type, task/milestone, command, result, `passed`, details, artifact paths, and timestamp. Manual completion evidence
 may be recorded as failed/insufficient; it does not automatically satisfy program/high-risk verification gates.
+
+An active `must` requirement linked to a milestone or one of its tasks needs successful evidence that explicitly
+lists its requirement ID before the milestone can be verified. The evidence must belong to a non-skipped task in
+that milestone, and that task must also link the requirement. Validation reports this as a warning while the
+milestone is unfinished and as an error once its tasks are terminal; finalization blocks on the error. Taskless,
+cross-linked, or skipped-task evidence does not count. This checks traceability of recorded evidence, not the truth
+of a manually entered claim. `require_evidence: never` disables per-task risk-based evidence checks, but does not
+waive this must-have requirement proof gate. A terminal plan (all tasks done or skipped) is treated as a completed
+milestone for this gate even if cached milestone status has drifted.
 
 ## Checkpoints
 

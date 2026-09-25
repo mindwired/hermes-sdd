@@ -61,8 +61,8 @@ function TaskRow({ task, root, refresh }) {
       if (status === 'done') {
         payload = {
           status,
-          summary: 'Completed from Hermes Desktop',
-          evidence: { type: 'manual', result: 'completion recorded; verification still required', passed: false }
+          summary: 'Implementation complete; verification pending',
+          evidence: { type: 'manual', result: 'verification pending', passed: false }
         }
       }
       await callOperation('transition', root, task.id, payload)
@@ -78,7 +78,7 @@ function TaskRow({ task, root, refresh }) {
     try {
       const result = await pluginCtx.rest(`/context?root=${encodeURIComponent(root)}&task_id=${encodeURIComponent(task.id)}`)
       await navigator.clipboard.writeText(result.text || '')
-      host.notify({ kind: 'success', message: `Copied context pack for ${task.id}` })
+      host.notify({ kind: 'success', message: `Copied ${result.estimated_tokens || 'bounded'} token context for ${task.id}` })
     } catch (error) {
       host.notifyError(error, 'Could not create context pack')
     } finally {
@@ -93,6 +93,9 @@ function TaskRow({ task, root, refresh }) {
         children: [
           jsx('div', { className: 'font-medium', children: `${task.id} — ${task.title}` }),
           jsx('div', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: task.objective || '' }),
+          task.status === 'done' && (!task.evidence_ids || task.evidence_ids.length === 0)
+            ? jsx('div', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: 'Implementation complete; verification pending' })
+            : null,
           jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx(Badge, { variant: 'outline', children: task.status }), jsx(Badge, { variant: 'outline', children: task.risk })] })
         ]
       }),
@@ -101,7 +104,10 @@ function TaskRow({ task, root, refresh }) {
         children: [
           jsx(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: copyContext, children: 'Copy context' }),
           task.status === 'pending' ? jsx(Button, { size: 'sm', disabled: busy, onClick: () => transition('in_progress'), children: 'Start' }) : null,
-          task.status === 'in_progress' ? jsx(Button, { size: 'sm', disabled: busy, onClick: () => transition('done'), children: 'Done' }) : null
+          task.status === 'in_progress' ? jsx(Button, { size: 'sm', disabled: busy, onClick: () => transition('done'), children: 'Implementation complete' }) : null,
+          task.status === 'done' && (!task.evidence_ids || task.evidence_ids.length === 0)
+            ? jsx(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => transition('done'), children: 'Record verification' })
+            : null
         ]
       })
     ]

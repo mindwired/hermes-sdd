@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_sdd.context_pack import checkpoint_delta
+from hermes_sdd.context_pack import _scope_files, checkpoint_delta
 from hermes_sdd.core import SDDService, _path_overlap, complexity_mode, tool_response
 from hermes_sdd.registry import SourceRegistry
 from hermes_sdd.storage import project_lock
@@ -105,6 +105,7 @@ class CoreTestCase(unittest.TestCase):
                         "acceptance": ["Contract rejects invalid data"],
                         "file_scope": ["src/contracts/**", "tests/contracts/**"],
                         "requirement_ids": ["REQ-001"],
+                        "exit_criteria_ids": ["M001-EC001"],
                     },
                     {
                         "id": "M001-T002",
@@ -114,6 +115,7 @@ class CoreTestCase(unittest.TestCase):
                         "acceptance": ["Query returns the ingested record"],
                         "file_scope": ["src/query/**", "tests/query/**"],
                         "requirement_ids": ["REQ-001"],
+                        "exit_criteria_ids": ["M001-EC001"],
                     },
                 ],
             },
@@ -147,6 +149,7 @@ class CoreTestCase(unittest.TestCase):
                     "command": "python -m unittest",
                     "result": "passed",
                     "passed": True,
+                    "exit_criteria_ids": ["M001-EC001"],
                 },
             },
         )
@@ -167,6 +170,7 @@ class CoreTestCase(unittest.TestCase):
                     "command": "tests/query",
                     "result": "passed",
                     "passed": True,
+                    "exit_criteria_ids": ["M001-EC001"],
                 },
             },
         )
@@ -182,6 +186,10 @@ class CoreTestCase(unittest.TestCase):
         self.assertEqual(finalized["status"], "verified")
         self.assertEqual(finalized["project_status"], "complete")
         self.assertTrue((root / ".sdd" / "PROJECT.md").exists())
+        roadmap = (root / ".sdd" / "ROADMAP.md").read_text(encoding="utf-8")
+        plan = (root / ".sdd" / "milestones" / "M001" / "PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("M001-EC001", roadmap)
+        self.assertIn("Exit criteria: M001-EC001", plan)
 
     def test_conflict_safe_wave(self) -> None:
         root = self.root()
@@ -223,6 +231,272 @@ class CoreTestCase(unittest.TestCase):
         )
         wave = self.service.execute("next", root=str(root), options={"limit": 4})["wave"]
         self.assertEqual([task["id"] for task in wave], ["M001-T001", "M001-T002"])
+
+    def test_next_explains_when_all_tasks_are_terminal(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Complete slice"},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement slice",
+                        "objective": "Deliver the slice",
+                        "acceptance": ["Slice works"],
+                        "file_scope": ["src/**"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "evidence": {"type": "test", "command": "test", "result": "passed", "passed": True},
+            },
+        )
+
+        result = self.service.execute("next", root=str(root))
+
+        self.assertEqual(result["wave"], [])
+        self.assertEqual(
+            result["reason"], "milestone tasks are terminal; verify and finalize the milestone"
+        )
+        status = self.service.execute("status", root=str(root))
+        self.assertEqual(status["action"]["kind"], "verify_milestone")
+
+    def test_force_finalization_is_explicitly_audited_and_not_reported_as_verified(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M001", "title": "Incomplete"}
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={"milestone_id": "M001", "tasks": [{"id": "M001-T001", "title": "Unfinished"}]},
+        )
+
+        result = self.service.execute(
+            "finalize_milestone",
+            root=str(root),
+            target="M001",
+            payload={"summary": "Administrative recovery override", "override_reason": "Recovery"},
+            options={"force": True},
+        )
+
+        self.assertEqual(result["status"], "overridden")
+        self.assertTrue(result["forced"])
+        self.assertEqual(result["override_reason"], "Recovery")
+        self.assertEqual(result["project_status"], "overridden")
+        project = json.loads((root / ".sdd" / "project.json").read_text())
+        state = json.loads((root / ".sdd" / "state.json").read_text())
+        self.assertEqual(project["status"], "overridden")
+        self.assertEqual(state["status"], "overridden")
+        milestone = json.loads(
+            (root / ".sdd" / "milestones" / "M001" / "milestone.json").read_text()
+        )
+        self.assertEqual(milestone["status"], "overridden")
+        summary = (root / ".sdd" / "milestones" / "M001" / "summary.md").read_text()
+        self.assertIn("Administrative override", summary)
+        self.assertIn("Recovery", summary)
+        events = [
+            json.loads(line)
+            for line in (root / ".sdd" / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        finalized = [event for event in events if event.get("kind") == "milestone_finalized"][-1]
+        self.assertTrue(finalized["forced"])
+        self.assertEqual(finalized["override_reason"], "Recovery")
+
+    def test_forced_finalization_requires_an_override_reason(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M001", "title": "Incomplete"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "payload.override_reason"):
+            self.service.execute(
+                "finalize_milestone",
+                root=str(root),
+                target="M001",
+                payload={},
+                options={"force": True},
+            )
+
+        milestone = json.loads(
+            (root / ".sdd" / "milestones" / "M001" / "milestone.json").read_text()
+        )
+        state = json.loads((root / ".sdd" / "state.json").read_text())
+        self.assertEqual(milestone["status"], "planned")
+        self.assertEqual(state["active_milestone"], "M001")
+
+    def test_new_milestone_reopens_project_after_forced_finalization(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M001", "title": "Incomplete"}
+        )
+        self.service.execute(
+            "finalize_milestone",
+            root=str(root),
+            target="M001",
+            payload={"override_reason": "Recovery"},
+            options={"force": True},
+        )
+
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M002", "title": "Resume work"}
+        )
+
+        project = json.loads((root / ".sdd" / "project.json").read_text())
+        state = json.loads((root / ".sdd" / "state.json").read_text())
+        self.assertEqual(project["status"], "active")
+        self.assertEqual(state["active_milestone"], "M002")
+        self.assertEqual(state["status"], "planning")
+
+    def test_next_explains_when_every_remaining_task_is_blocked(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Blocked slice"},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Blocked work",
+                        "objective": "Wait for the dependency",
+                        "acceptance": ["Dependency available"],
+                        "file_scope": ["src/**"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "blocked", "blocked_reason": "External dependency unavailable"},
+        )
+
+        result = self.service.execute("next", root=str(root))
+
+        self.assertEqual(result["wave"], [])
+        self.assertEqual(
+            result["reason"], "no dependency-ready task; blocked tasks require recovery"
+        )
+        status = self.service.execute("status", root=str(root))
+        self.assertEqual(status["action"]["kind"], "resolve_blocker")
+
+    def test_status_summarizes_large_active_plans_without_returning_every_task(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Large plan"},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": f"M001-T{index:03d}",
+                        "title": f"Task {index}",
+                        "objective": f"Outcome {index}",
+                        "acceptance": [f"Acceptance {index}"],
+                        "file_scope": [f"src/task-{index}/**"],
+                    }
+                    for index in range(1, 21)
+                ],
+            },
+        )
+
+        result = self.service.execute("status", root=str(root))
+
+        self.assertEqual(result["active_task_count"], 20)
+        self.assertEqual(result["action"]["kind"], "execute_task")
+        self.assertEqual(result["action"]["validation_error_count"], 0)
+        self.assertEqual(result["active_validation"]["error_count"], 0)
+        self.assertEqual(len(result["next"]["wave"]), 1)
+        self.assertEqual(len(result["active_tasks"]), 12)
+        self.assertTrue(result["active_tasks_truncated"])
+        self.assertEqual(result["active_tasks"][-1]["id"], "M001-T012")
+        limited = self.service.execute("status", root=str(root), options={"active_task_limit": 4})
+        self.assertEqual(len(limited["active_tasks"]), 4)
+        self.assertTrue(limited["active_tasks_truncated"])
+        self.assertEqual(len(limited["next"]["wave"]), 1)
+
+        compact = self.service.execute("status", root=str(root), options={"detail": "compact"})
+        self.assertNotIn("active_tasks", compact)
+        self.assertEqual(compact["active_task_count"], 20)
+        self.assertEqual(len(compact["next"]["wave"]), 1)
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(limited)))
+
+    def test_status_rejects_malformed_authoritative_plan(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M001", "title": "No tasks"}
+        )
+        plan_path = root / ".sdd" / "milestones" / "M001" / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["tasks"] = "malformed"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "plan tasks must be a list"):
+            self.service.execute("status", root=str(root), options={"detail": "summary"})
+
+    def test_status_rejects_non_integer_active_task_limit(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+
+        with self.assertRaisesRegex(ValueError, "active_task_limit must be an integer"):
+            self.service.execute("status", root=str(root), options={"active_task_limit": "many"})
+
+    def test_status_identifies_active_milestone_validation_blocker(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="quick")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Invalid outcome", "requirement_ids": ["REQ-MISSING"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={"milestone_id": "M001", "tasks": [{"id": "M001-T001", "title": "Work"}]},
+        )
+
+        result = self.service.execute("status", root=str(root))
+
+        self.assertEqual(result["action"]["kind"], "resolve_validation")
+        self.assertEqual(result["active_validation"]["error_count"], 1)
+        self.assertEqual(
+            result["active_validation"]["findings"][0]["code"], "milestone.unknown_requirement"
+        )
 
     def test_checkpoint_delta_and_tool_errors(self) -> None:
         root = self.root()
@@ -429,6 +703,71 @@ class CoreTestCase(unittest.TestCase):
         )
         self.assertIn("src/api/routes.py", delta["changed"])
 
+    def test_scope_file_limit_fails_loudly_instead_of_returning_partial_set(self) -> None:
+        root = self.root()
+        source = root / "src"
+        source.mkdir()
+        for index in range(3):
+            (source / f"module-{index}.py").write_text("pass\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "matches more than 2 project files"):
+            _scope_files(root, ["src/**/*.py"], limit=2)
+
+    def test_scope_file_limit_does_not_treat_duplicate_matches_as_overflow(self) -> None:
+        root = self.root()
+        source = root / "src"
+        source.mkdir()
+        for index in range(2):
+            (source / f"module-{index}.py").write_text("pass\n", encoding="utf-8")
+
+        files = _scope_files(root, ["src/**/*.py", "src/module-*.py"], limit=2)
+
+        self.assertEqual(len(files), 2)
+
+    def test_scope_file_limit_stops_consuming_glob_after_first_overflow_file(self) -> None:
+        root = self.root()
+        source = root / "src"
+        source.mkdir()
+        files = []
+        for index in range(20):
+            path = source / f"module-{index}.py"
+            path.write_text("pass\n", encoding="utf-8")
+            files.append(path)
+        consumed = []
+
+        def paths():
+            for path in files:
+                consumed.append(path)
+                yield str(path)
+
+        with patch("hermes_sdd.context_pack.glob.iglob", return_value=paths()):
+            with self.assertRaisesRegex(ValueError, "matches more than 2 project files"):
+                _scope_files(root, ["src/**/*.py"], limit=2)
+
+        self.assertEqual(consumed, files[:3])
+
+    def test_scope_file_limit_bounds_recursive_directory_walker(self) -> None:
+        root = self.root()
+        source = root / "src"
+        source.mkdir()
+        files = []
+        for index in range(20):
+            path = source / f"module-{index}.py"
+            path.write_text("pass\n", encoding="utf-8")
+            files.append(path)
+        consumed = []
+
+        def paths():
+            for path in files:
+                consumed.append(path)
+                yield path
+
+        with patch.object(Path, "rglob", return_value=paths()):
+            with self.assertRaisesRegex(ValueError, "matches more than 2 project files"):
+                _scope_files(root, ["src"], limit=2)
+
+        self.assertEqual(consumed, files[:3])
+
     def test_context_checkpoint_excludes_default_secret_patterns(self) -> None:
         root = self.root(source=True)
         self.initialize(root, mode="standard")
@@ -483,6 +822,647 @@ class CoreTestCase(unittest.TestCase):
         self.assertEqual(result["milestone_status_counts"], {})
         self.assertTrue(any(item["code"] == "requirement.uncovered" for item in result["findings"]))
 
+    def test_exit_criterion_without_linked_evidence_blocks_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Verify output",
+                        "objective": "Run the output check",
+                        "acceptance": ["The output passes"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "done", "summary": "Checked"},
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertFalse(validation["ok"])
+        self.assertTrue(
+            any(
+                item["code"] == "milestone.exit_criterion_proof_missing"
+                and item["target"] == "M001-EC001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_failed_exit_criterion_evidence_does_not_satisfy_finalization(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Verify output",
+                        "objective": "Run the output check",
+                        "acceptance": ["The output passes"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "evidence": {
+                    "type": "test",
+                    "command": "uv run pytest",
+                    "result": "failed",
+                    "passed": False,
+                    "exit_criteria_ids": ["M001-EC001"],
+                },
+            },
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertFalse(validation["ok"])
+        self.assertTrue(
+            any(
+                item["code"] == "milestone.exit_criterion_proof_missing"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_linked_exit_criterion_evidence_satisfies_finalization(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Verify output",
+                        "objective": "Run the output check",
+                        "acceptance": ["The output passes"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "summary": "Checked",
+                "evidence": {
+                    "type": "test",
+                    "command": "uv run pytest tests/integration/test_path.py",
+                    "result": "passed",
+                    "passed": True,
+                    "exit_criteria_ids": ["M001-EC001"],
+                },
+            },
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertTrue(validation["ok"])
+        finalized = self.service.execute(
+            "finalize_milestone", root=str(root), target="M001", payload={}
+        )
+        self.assertEqual(finalized["status"], "verified")
+
+    def test_exit_criterion_evidence_must_match_task_criterion_link(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement",
+                        "objective": "Implement output",
+                        "acceptance": ["Output exists"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "done"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "also be linked to the target task"):
+            self.service.execute(
+                "record_evidence",
+                root=str(root),
+                target="M001-T001",
+                payload={
+                    "type": "test",
+                    "command": "uv run pytest",
+                    "result": "passed",
+                    "passed": True,
+                    "exit_criteria_ids": ["M001-EC001"],
+                },
+            )
+
+    def test_exit_criterion_evidence_for_skipped_task_is_not_proof(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Verify output",
+                        "objective": "Run the output check",
+                        "acceptance": ["The output passes"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "skipped", "summary": "Deferred"},
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertFalse(validation["ok"])
+        self.assertTrue(
+            any(
+                item["code"] == "milestone.exit_criterion_proof_missing"
+                and item["target"] == "M001-EC001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_updating_legacy_exit_criteria_assigns_stable_ids_and_retires_removed(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Old criterion"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        roadmap_path = root / ".sdd" / "roadmap.json"
+        milestone = json.loads(milestone_path.read_text(encoding="utf-8"))
+        milestone.pop("exit_criteria_records")
+        milestone.pop("exit_criteria_schema_version")
+        milestone_path.write_text(json.dumps(milestone), encoding="utf-8")
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0].pop("exit_criteria_records")
+        roadmap["milestones"][0].pop("exit_criteria_schema_version")
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+        updated = self.service.execute(
+            "update_milestone",
+            root=str(root),
+            target="M001",
+            payload={"exit_criteria": ["New criterion"]},
+        )
+
+        self.assertEqual(updated["milestone"]["exit_criteria_records"][0]["id"], "M001-EC002")
+        self.assertEqual(updated["milestone"]["exit_criteria_records"][0]["status"], "active")
+        self.assertEqual(updated["milestone"]["exit_criteria_records"][1]["id"], "M001-EC001")
+        self.assertEqual(updated["milestone"]["exit_criteria_records"][1]["status"], "retired")
+
+    def test_retired_exit_criterion_cannot_remain_linked_to_task(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Old criterion"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Deliver",
+                        "objective": "Deliver",
+                        "acceptance": ["Delivered"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "update_task",
+            root=str(root),
+            target="M001-T001",
+            payload={"exit_criteria_ids": ["M001-EC999"]},
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertTrue(
+            any(
+                item["code"] == "task.unknown_exit_criterion" and item["target"] == "M001-T001"
+                for item in validation["findings"]
+            )
+        )
+
+    def test_update_milestone_cannot_retire_linked_criterion(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Old criterion"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Deliver",
+                        "objective": "Deliver",
+                        "acceptance": ["Delivered"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot remove existing criterion IDs"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M001-EC002", "text": "New criterion", "status": "active"}
+                    ]
+                },
+            )
+
+    def test_update_milestone_cannot_retire_criterion_linked_to_task(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Old criterion"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Deliver",
+                        "objective": "Deliver",
+                        "acceptance": ["Delivered"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        before = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "linked to tasks"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M001-EC001", "text": "Old criterion", "status": "retired"}
+                    ]
+                },
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), before)
+
+    def test_update_milestone_cannot_retire_linked_criterion_via_text_list(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Old criterion"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Deliver",
+                        "objective": "Deliver",
+                        "acceptance": ["Delivered"],
+                        "exit_criteria_ids": ["M001-EC001"],
+                    }
+                ],
+            },
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        before = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "linked to tasks"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={"exit_criteria": []},
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), before)
+
+    def test_invalid_exit_criterion_record_schema_is_rejected_without_changes(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        before = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate structured exit criterion"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M002-EC001", "text": "Not this milestone", "status": "active"}
+                    ]
+                },
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), before)
+
+    def test_exit_criterion_schema_version_rejects_boolean(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+
+        with self.assertRaisesRegex(ValueError, "schema version 1"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_schema_version": True,
+                    "exit_criteria_records": [
+                        {"id": "M001-EC001", "text": "The output passes", "status": "active"}
+                    ],
+                },
+            )
+
+    def test_exit_criterion_schema_rejects_unhashable_status(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        before = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate structured exit criterion"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M001-EC001", "text": "The output passes", "status": []}
+                    ]
+                },
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), before)
+
+    def test_exit_criterion_schema_rejects_boolean_status(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        before = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate structured exit criterion"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M001-EC001", "text": "The output passes", "status": True}
+                    ]
+                },
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), before)
+
+    def test_exit_criterion_text_reconciliation_rejects_unhashable_status(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["The output passes"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        milestone = json.loads(milestone_path.read_bytes())
+        milestone["exit_criteria_records"][0]["status"] = []
+        milestone_path.write_text(json.dumps(milestone), encoding="utf-8")
+        roadmap_path = root / ".sdd" / "roadmap.json"
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0]["exit_criteria_records"][0]["status"] = []
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+        malformed_milestone = milestone_path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "active/retired status"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={"exit_criteria": ["A revised criterion"]},
+            )
+
+        self.assertEqual(milestone_path.read_bytes(), malformed_milestone)
+
+    def test_structured_exit_criterion_update_cannot_erase_or_reuse_ids(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Original"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        original = json.loads(milestone_path.read_text(encoding="utf-8"))
+
+        with self.assertRaisesRegex(ValueError, "cannot remove existing criterion IDs"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={"exit_criteria_records": []},
+            )
+
+        self.assertEqual(json.loads(milestone_path.read_text(encoding="utf-8")), original)
+
+        with self.assertRaisesRegex(ValueError, "text is immutable"):
+            self.service.execute(
+                "update_milestone",
+                root=str(root),
+                target="M001",
+                payload={
+                    "exit_criteria_records": [
+                        {"id": "M001-EC001", "text": "Changed", "status": "active"}
+                    ]
+                },
+            )
+
+        updated = json.loads(milestone_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["exit_criteria_records"][0]["id"], "M001-EC001")
+        self.assertEqual(updated["exit_criteria_records"][0]["text"], "Original")
+
+    def test_legacy_exit_criterion_requires_explicit_migration_before_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Outcome", "exit_criteria": ["Legacy outcome passes"]},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        roadmap_path = root / ".sdd" / "roadmap.json"
+        milestone = json.loads(milestone_path.read_text(encoding="utf-8"))
+        milestone.pop("exit_criteria_records")
+        milestone.pop("exit_criteria_schema_version")
+        milestone_path.write_text(json.dumps(milestone), encoding="utf-8")
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0].pop("exit_criteria_records")
+        roadmap["milestones"][0].pop("exit_criteria_schema_version")
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Deliver",
+                        "objective": "Deliver the outcome",
+                        "acceptance": ["Outcome delivered"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "done"}
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertTrue(
+            any(
+                item["code"] == "milestone.exit_criteria_unmapped"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
     def test_failed_evidence_blocks_program_milestone(self) -> None:
         root = self.root()
         self.initialize(root, mode="program")
@@ -496,7 +1476,7 @@ class CoreTestCase(unittest.TestCase):
         self.service.execute(
             "create_milestone",
             root=str(root),
-            payload={"id": "M001", "title": "Verified", "exit_criteria": ["Tests pass"]},
+            payload={"id": "M001", "title": "Verified", "exit_criteria": []},
         )
         self.service.execute(
             "set_plan",
@@ -541,6 +1521,593 @@ class CoreTestCase(unittest.TestCase):
             "verified",
         )
 
+    def test_active_must_requirement_without_evidence_blocks_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Required outcome",
+                        "statement": "The required outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                        "priority": "must",
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Required slice", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement requirement",
+                        "objective": "Implement it",
+                        "acceptance": ["It works"],
+                        "file_scope": ["src/**"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "done", "summary": "Implemented"},
+        )
+        self.service.execute(
+            "record_evidence",
+            root=str(root),
+            payload={
+                "type": "test",
+                "command": "uv run python -m unittest",
+                "result": "passed",
+                "passed": True,
+                "requirement_ids": ["REQ-001"],
+            },
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+        self.assertFalse(validation["ok"])
+        self.assertTrue(
+            any(
+                item["code"] == "requirement.proof_missing" and item["target"] == "REQ-001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_requirement_proof_blocker_survives_stale_milestone_status(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Required outcome",
+                        "statement": "The required outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Required slice", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement requirement",
+                        "objective": "Implement it",
+                        "acceptance": ["It works"],
+                        "file_scope": ["src/**"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "done", "summary": "Implemented"},
+        )
+        milestone_path = root / ".sdd" / "milestones" / "M001" / "milestone.json"
+        milestone = json.loads(milestone_path.read_text(encoding="utf-8"))
+        milestone["status"] = "ready"
+        milestone_path.write_text(json.dumps(milestone), encoding="utf-8")
+        roadmap_path = root / ".sdd" / "roadmap.json"
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0]["status"] = "ready"
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+        observed_status = self.service.execute("status", root=str(root))["active_milestone"]
+        self.assertEqual(observed_status["status"], "ready")
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        proof_findings = [
+            item
+            for item in validation["findings"]
+            if item["code"] == "requirement.proof_missing" and item["target"] == "REQ-001"
+        ]
+        self.assertEqual(len(proof_findings), 1)
+        self.assertEqual(proof_findings[0]["severity"], "error")
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_task_linked_requirement_without_milestone_link_blocks_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Task-scoped outcome",
+                        "statement": "The task-scoped outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone", root=str(root), payload={"id": "M001", "title": "Work"}
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement outcome",
+                        "objective": "Implement outcome",
+                        "acceptance": ["Outcome verified"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "done", "summary": "Implemented"},
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertTrue(
+            any(
+                item["code"] == "requirement.proof_missing"
+                and item["target"] == "REQ-001"
+                and item["milestone_id"] == "M001"
+                for item in validation["findings"]
+            )
+        )
+        self.assertFalse(
+            any(
+                item["code"] == "requirement.unplanned" and item["target"] == "REQ-001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_roadmap_requirement_link_drift_blocks_unverified_milestone_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Milestone outcome",
+                        "statement": "The outcome is observable.",
+                        "acceptance": ["The outcome is verified"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Linked milestone", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement",
+                        "objective": "Implement the outcome",
+                        "acceptance": ["Implementation is complete"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "done", "summary": "Implemented"},
+        )
+        roadmap_path = root / ".sdd" / "roadmap.json"
+        roadmap = json.loads(roadmap_path.read_text(encoding="utf-8"))
+        roadmap["milestones"][0]["requirement_ids"] = []
+        roadmap_path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+
+        self.assertTrue(
+            any(
+                item["code"] == "milestone.requirement_link_drift"
+                and item["target"] == "M001"
+                and item["severity"] == "error"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_evidence_on_task_unlinked_to_requirement_does_not_prove_it(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Required outcome",
+                        "statement": "The required outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Required slice", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement requirement",
+                        "objective": "Implement it",
+                        "acceptance": ["It works"],
+                        "file_scope": ["src/**"],
+                        "requirement_ids": [],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "summary": "Implemented",
+                "evidence": {
+                    "type": "test",
+                    "command": "uv run python -m unittest",
+                    "result": "passed",
+                    "passed": True,
+                    "requirement_ids": ["REQ-001"],
+                },
+            },
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+        self.assertFalse(validation["ok"])
+        self.assertTrue(
+            any(
+                item["code"] == "requirement.proof_missing" and item["target"] == "REQ-001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
+    def test_successful_evidence_explicitly_linked_to_requirement_allows_finalize(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Required outcome",
+                        "statement": "The required outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Required slice", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement requirement",
+                        "objective": "Implement it",
+                        "acceptance": ["It works"],
+                        "file_scope": ["src/**"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "summary": "Implemented and verified",
+                "evidence": {
+                    "type": "test",
+                    "command": "uv run python -m unittest",
+                    "result": "passed",
+                    "passed": True,
+                    "requirement_ids": ["REQ-001"],
+                },
+            },
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+        self.assertFalse(
+            any(
+                item["code"] == "requirement.proof_missing" and item["target"] == "REQ-001"
+                for item in validation["findings"]
+            )
+        )
+        self.assertEqual(
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})[
+                "status"
+            ],
+            "verified",
+        )
+
+    def test_future_milestone_requirement_without_proof_does_not_block_current(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Shared outcome",
+                        "statement": "The outcome is observable.",
+                        "acceptance": ["Outcome verified"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Current", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Verify current outcome",
+                        "objective": "Verify current outcome",
+                        "acceptance": ["Outcome verified"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "transition", root=str(root), target="M001-T001", payload={"status": "in_progress"}
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={
+                "status": "done",
+                "summary": "Verified current outcome",
+                "evidence": {
+                    "type": "test",
+                    "command": "tests",
+                    "result": "passed",
+                    "passed": True,
+                    "requirement_ids": ["REQ-001"],
+                },
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M002", "title": "Future", "requirement_ids": ["REQ-001"]},
+            options={"activate": False},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M002",
+                "tasks": [
+                    {
+                        "id": "M002-T001",
+                        "title": "Future outcome work",
+                        "objective": "Future outcome work",
+                        "acceptance": ["Outcome verified"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        state_path = root / ".sdd" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["active_milestone"] = "M001"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        future_plan_path = root / ".sdd" / "milestones" / "M002" / "plan.json"
+        future_plan = json.loads(future_plan_path.read_text(encoding="utf-8"))
+        future_plan["tasks"][0]["status"] = "done"
+        future_plan_path.write_text(json.dumps(future_plan), encoding="utf-8")
+
+        future_findings = [
+            item
+            for item in self.service.execute("validate", root=str(root), payload={"record": False})[
+                "findings"
+            ]
+            if item["code"] == "requirement.proof_missing"
+        ]
+        self.assertEqual(len(future_findings), 1)
+        self.assertEqual(future_findings[0]["milestone_id"], "M002")
+
+        finalized = self.service.execute(
+            "finalize_milestone", root=str(root), target="M001", payload={}
+        )
+
+        self.assertEqual(finalized["status"], "verified")
+        self.assertEqual(finalized["next_milestone"], "M002")
+
+    def test_skipped_task_evidence_does_not_count_as_requirement_proof(self) -> None:
+        root = self.root()
+        self.initialize(root, mode="standard")
+        self.service.execute(
+            "upsert_spec",
+            root=str(root),
+            payload={
+                "requirements": [
+                    {
+                        "id": "REQ-001",
+                        "title": "Required outcome",
+                        "statement": "The required outcome is observable.",
+                        "acceptance": ["A verification result is recorded"],
+                    }
+                ]
+            },
+        )
+        self.service.execute(
+            "create_milestone",
+            root=str(root),
+            payload={"id": "M001", "title": "Required slice", "requirement_ids": ["REQ-001"]},
+        )
+        self.service.execute(
+            "set_plan",
+            root=str(root),
+            payload={
+                "milestone_id": "M001",
+                "tasks": [
+                    {
+                        "id": "M001-T001",
+                        "title": "Implement requirement",
+                        "objective": "Implement it",
+                        "acceptance": ["It works"],
+                        "file_scope": ["src/**"],
+                        "requirement_ids": ["REQ-001"],
+                    }
+                ],
+            },
+        )
+        self.service.execute(
+            "record_evidence",
+            root=str(root),
+            payload={
+                "type": "test",
+                "command": "uv run python -m unittest",
+                "result": "passed",
+                "passed": True,
+                "requirement_ids": ["REQ-001"],
+            },
+        )
+        self.service.execute(
+            "transition",
+            root=str(root),
+            target="M001-T001",
+            payload={"status": "skipped", "summary": "Not implemented"},
+        )
+
+        validation = self.service.execute("validate", root=str(root), payload={"record": False})
+        self.assertTrue(
+            any(
+                item["code"] == "requirement.proof_missing" and item["target"] == "REQ-001"
+                for item in validation["findings"]
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be finalized"):
+            self.service.execute("finalize_milestone", root=str(root), target="M001", payload={})
+
     def test_future_milestone_error_does_not_block_current(self) -> None:
         root = self.root()
         self.initialize(root, mode="standard")
@@ -550,7 +2117,7 @@ class CoreTestCase(unittest.TestCase):
             payload={
                 "id": "M001",
                 "title": "Current",
-                "exit_criteria": ["Done"],
+                "exit_criteria": [],
                 "interfaces_stable": True,
             },
         )
@@ -586,7 +2153,7 @@ class CoreTestCase(unittest.TestCase):
                 "id": "M002",
                 "title": "Future",
                 "requirement_ids": ["REQ-MISSING"],
-                "exit_criteria": ["Later"],
+                "exit_criteria": [],
             },
             options={"activate": False},
         )

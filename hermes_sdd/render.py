@@ -57,6 +57,12 @@ def render_all(root: Path) -> None:
     for milestone in roadmap.get("milestones", []):
         reqs = ", ".join(milestone.get("requirement_ids", [])) or "none"
         decision_links = ", ".join(milestone.get("decision_ids", [])) or "none"
+        criterion_records = milestone.get("exit_criteria_records", [])
+        criterion_by_text = {
+            item.get("text"): item.get("id")
+            for item in criterion_records
+            if isinstance(item, dict) and item.get("status") == "active"
+        }
         roadmap_lines.extend(
             [
                 f"## {milestone.get('id')} — {milestone.get('title', 'Untitled')}",
@@ -68,7 +74,10 @@ def render_all(root: Path) -> None:
                 f"- Requirements: {reqs}",
                 f"- Decisions: {decision_links}",
                 "- Exit criteria:",
-                *[f"  - {item}" for item in milestone.get("exit_criteria", [])],
+                *[
+                    f"  - `{criterion_by_text.get(item, 'unmapped')}` — {item}"
+                    for item in milestone.get("exit_criteria", [])
+                ],
                 "",
             ]
         )
@@ -105,6 +114,7 @@ def render_all(root: Path) -> None:
                 else "not completed"
             )
             requirement_links = ", ".join(map(str, task.get("requirement_ids", []))) or "none"
+            exit_criterion_links = ", ".join(map(str, task.get("exit_criteria_ids", []))) or "none"
             plan_lines.extend(
                 [
                     f"## {task_id} — {task.get('title', 'Untitled')}",
@@ -117,6 +127,7 @@ def render_all(root: Path) -> None:
                     f"- File scope: {', '.join(map(str, task.get('file_scope', []))) or 'global/unknown'}",
                     f"- Evidence: {evidence_state}",
                     f"- Requirements: {requirement_links}",
+                    f"- Exit criteria: {exit_criterion_links}",
                     "- Acceptance:",
                     *[f"  - {item}" for item in task.get("acceptance", [])],
                     "",

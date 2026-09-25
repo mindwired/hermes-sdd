@@ -14,8 +14,8 @@ The goal is working, maintainable software. SDD state exists to preserve intent 
 
 ## Select work
 
-1. Call `sdd(operation="next")` for the active milestone.
-2. Use the returned wave as the maximum parallel set, not a requirement to parallelize.
+1. Call `sdd(operation="next")` for the active milestone. If its wave is empty, read `reason` and reconcile/finalize rather than retrying the same selection.
+2. Use the returned wave as the maximum parallel set, not a requirement to parallelize. Do not call `status` with full detail repeatedly; use bounded `status`, then `next`, then a task-specific `context_pack`.
 3. Execute a task directly when it is small and the current session has clean context. Delegate when the task is large, specialized, independent, or would pollute the orchestrator context.
 4. Before a substantial task, create a checkpoint:
 
@@ -42,6 +42,8 @@ Mark the task in progress before edits:
 During implementation:
 
 - honor linked requirements and ADRs;
+- implement the task's `exit_criteria_ids` links where applicable; add a link with `update_task` before recording
+  criterion-specific evidence;
 - inspect existing conventions rather than inventing parallel abstractions;
 - keep edits inside the declared scope unless a discovered dependency makes expansion necessary;
 - when scope expands, stop conflicting workers and call `update_task` before continuing;
@@ -57,7 +59,7 @@ Record concise, reproducible evidence. Prefer commands, test names, artifact pat
 {"operation":"transition","root":"<repo>","target":"M001-T001","payload":{"status":"done","summary":"Implemented the end-to-end path.","evidence":{"type":"test","command":"uv run pytest tests/integration/test_path.py","result":"passed","requirement_ids":["REQ-001"]}}}
 ```
 
-For low-risk quick tasks, one focused check may be enough. For high/critical tasks or deep/program mode, provide evidence for all meaningful acceptance criteria.
+For low-risk quick tasks, one focused check may be enough. For high/critical tasks or deep/program mode, provide evidence for all meaningful acceptance criteria. When evidence verifies a milestone exit criterion, include that ID in `evidence.exit_criteria_ids`; the target task must also link it in `exit_criteria_ids`.
 
 If blocked, record the real blocker and what was tried. Do not repeatedly retry the same approach without new information:
 

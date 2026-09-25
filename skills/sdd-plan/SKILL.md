@@ -29,6 +29,7 @@ Each task should:
 - list dependencies by task id;
 - list a conservative `file_scope` so the scheduler can prevent conflicting parallel edits;
 - link requirements and ADRs that directly constrain it;
+- link any milestone exit criteria it will implement or verify with `exit_criteria_ids`;
 - identify risk and a suitable role (`architect`, `builder`, `tester`, `reviewer`, `security`, `data`, etc.).
 
 Prefer vertical slices. Avoid tasks such as “implement backend” or “finish frontend.” Avoid microtasks that force the agent to repeatedly reload the same context.
@@ -50,6 +51,10 @@ Then call `operation="next"`. Review the proposed wave. If tasks unexpectedly co
 ## Plan quality checks
 
 A strong plan has no dependency cycles, no orphaned must-have requirement, no unverifiable acceptance criterion, no critical task without explicit risk handling, and no task that requires reading the entire project history. Use `operation="validate"` before execution on deep/program work.
+
+Milestone exit criteria receive stable IDs when created or migrated. Every active criterion must be mapped to at least
+one task; finalization later requires successful criterion-linked evidence from a non-skipped linked task. Do not
+map criteria to tasks that cannot provide observable verification.
 
 ## Output
 

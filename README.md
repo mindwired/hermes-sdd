@@ -135,6 +135,14 @@ The `auto` mode scores novelty, ambiguity, surface area, risk, expected duration
 8. Validate traceability and finalize the milestone.
 9. Recover from interruption by reconciling `.sdd/`, Git, source files, and evidence—not by trusting stale status.
 
+Finalization requires successful, explicitly requirement-linked evidence for each active must-have requirement linked to the milestone or one of its tasks. Evidence must belong to a non-skipped task in that milestone, and the task must also link the requirement. This applies regardless of the task's individual risk level; the risk-based evidence policy adds task-level gates. Neither gate independently proves that user-recorded evidence is truthful.
+
+Milestone exit criteria are structured with stable IDs. Link each criterion from its implementing/verifying task using
+`exit_criteria_ids`, then link successful evidence using `evidence.exit_criteria_ids`; normal finalization requires
+that traceability through a non-skipped task. Existing prose-only milestone criteria must be migrated with
+`update_milestone` before verified finalization. Evidence metadata does not prove the truth of a manual claim. A
+forced finalization is explicitly marked `overridden`, not `verified`, and requires an override reason.
+
 ## One compact Agent tool
 
 The model sees one `sdd` tool with an `operation` field. Major operations include:
@@ -146,6 +154,13 @@ The model sees one `sdd` tool with an `operation` field. Major operations includ
 - `context_checkpoint`, `context_delta`, `context_pack`
 - `validate`, `register_source`, `list_sources`, `remove_source`
 
+`status` is a bounded orientation response: it returns aggregate counts, an explicit recommended action,
+target-scoped validation blockers, and at most 12 active task summaries by default. Pass
+`options.detail="compact"` to omit the task preview or `options.active_task_limit` to bound it differently.
+Use `next` to inspect the dependency-safe wave and its reason; use `search` or a task context pack for details.
+For HTTP clients, invalid requests return 400 and unexpected server failures return a generic 500 without internal
+exception details. Plan-revision conflicts currently share the 400 response for compatibility.
+
 The five bundled skills add procedural guidance only when relevant:
 
 - `sdd-start`
@@ -153,6 +168,11 @@ The five bundled skills add procedural guidance only when relevant:
 - `sdd-execute`
 - `sdd-verify`
 - `sdd-recover`
+
+Use the lightweight path for small bounded changes; use milestones and durable requirements only when work spans
+sessions, has meaningful ambiguity/risk, or needs coordination. `status` returns a bounded active-task preview;
+use `next` for the safe execution wave and `context_pack` for one task rather than repeatedly requesting full
+project state. Context packs are token estimates, not model-tokenizer guarantees.
 
 ## State model
 

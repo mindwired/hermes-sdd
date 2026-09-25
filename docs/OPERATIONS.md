@@ -2,8 +2,13 @@
 
 ## Normal operation
 
-Use `status` and `next` as compact orientation calls. Create context packs for substantial tasks rather than
-loading every SDD artifact. Checkpoint before work that may span a subagent, context reset, or long tool sequence.
+Use `status` and `next` as compact orientation calls. Status gives an action recommendation and bounded task
+preview; use `options.detail="compact"` when only counts and action are needed. Create one task context pack for
+substantial execution rather than repeatedly loading full status or every SDD artifact. Checkpoint before work
+that may span a subagent, context reset, or long tool sequence.
+
+For Dashboard HTTP clients, malformed/invalid operations and optimistic plan revision mismatches currently return
+400; unexpected internal failures return a generic 500 and do not include exception text.
 
 A returned safe wave is an upper bound. Serial execution is always acceptable when workers would compete for
 human attention, infrastructure, or a shared semantic boundary not captured by file paths.
@@ -17,6 +22,13 @@ hermes sdd validate
 Validation checks state structure, requirement links, task DAGs, evidence, milestone readiness, and project
 traceability. It does not prove the implementation works; repository tests and operational checks remain
 necessary.
+
+Before finalization, each active must-have requirement linked to the milestone or its tasks needs successful, explicitly requirement-linked evidence owned by a non-skipped task in that milestone that also links the requirement. For `standard` work this requirement-level gate applies even when the linked task is low-risk; the configurable risk-based policy controls additional task-level evidence checks.
+
+Each active structured exit criterion also requires successful evidence linked by its ID. Link the criterion to at
+least one plan task with `exit_criteria_ids`, then include the same ID in successful evidence recorded against that
+task. Legacy prose-only criteria must be migrated with `update_milestone` before normal verified finalization.
+Evidence links check traceability, not the independent truth of user-entered claims.
 
 For a standalone CLI invocation, pass `--root`/`-C` when the active Hermes working directory is not the intended
 repository. Remote terminal backends (`ssh`, Docker, Modal, Daytona, Vercel Sandbox, and Singularity) require an

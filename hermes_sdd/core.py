@@ -29,7 +29,16 @@ from .storage import (
 _MODES = {"auto", "quick", "standard", "deep", "program"}
 _TASK_STATES = {"pending", "in_progress", "blocked", "done", "skipped"}
 _RISKS = {"low", "medium", "high", "critical"}
-_MILESTONE_STATES = {"planned", "ready", "in_progress", "blocked", "done", "verified", "cancelled"}
+_MILESTONE_STATES = {
+    "planned",
+    "ready",
+    "in_progress",
+    "blocked",
+    "done",
+    "verified",
+    "overridden",
+    "cancelled",
+}
 _REQUIREMENT_PRIORITIES = {"must", "should", "could", "wont"}
 _REQUIREMENT_STATES = {"active", "satisfied", "deferred", "cancelled"}
 _DECISION_STATES = {"proposed", "accepted", "superseded", "rejected"}
@@ -65,6 +74,85 @@ def _decision_id(value: Any) -> str:
     if not _DECISION_ID_RE.fullmatch(decision_id):
         raise ValueError("Decision id must use the ADR-0001 format")
     return decision_id
+
+
+def _exit_criterion_records(
+    milestone_id: str,
+    criteria: list[str],
+    existing: Any = None,
+) -> list[dict[str, str]]:
+    """Reconcile active criterion text while retaining retired IDs as history."""
+    rows = [] if existing is None else existing
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("exit_criteria_records must be a list of criterion objects")
+    by_text: dict[str, deque[dict[str, str]]] = defaultdict(deque)
+    retired: list[dict[str, str]] = []
+    used_ids: set[str] = set()
+    for row in rows:
+        criterion_id = validate_id(row.get("id"), "exit criterion id")
+        text = row.get("text")
+        status = row.get("status", "active")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(status, str)
+            or status not in {"active", "retired"}
+        ):
+            raise ValueError(
+                "Each exit criterion requires non-empty text and active/retired status"
+            )
+        if (
+            not re.fullmatch(rf"{re.escape(milestone_id)}-EC\d{{3,}}", criterion_id)
+            or criterion_id in used_ids
+        ):
+            raise ValueError(f"Invalid or duplicate exit criterion id: {criterion_id}")
+        used_ids.add(criterion_id)
+        normalized = {"id": criterion_id, "text": text.strip(), "status": status}
+        if status == "active":
+            by_text[normalized["text"]].append(normalized)
+        else:
+            retired.append(normalized)
+
+    active: list[dict[str, str]] = []
+    for text in criteria:
+        matching = by_text[text].popleft() if by_text[text] else None
+        if matching is not None:
+            active.append(matching)
+            continue
+        criterion_id = _next_numeric_id(used_ids, f"{milestone_id}-EC", width=3)
+        used_ids.add(criterion_id)
+        active.append({"id": criterion_id, "text": text, "status": "active"})
+
+    for queue in by_text.values():
+        retired.extend({**row, "status": "retired"} for row in queue)
+    return [*active, *retired]
+
+
+def _validate_exit_criterion_records(
+    milestone_id: str, records: Any, schema_version: Any
+) -> list[dict[str, str]]:
+    if type(schema_version) is not int or schema_version != 1 or not isinstance(records, list):
+        raise ValueError("Structured exit criteria require schema version 1 and a record list")
+    normalized: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for item in records:
+        if not isinstance(item, dict):
+            raise ValueError("exit_criteria_records must contain criterion objects")
+        criterion_id = validate_id(str(item.get("id") or ""), "exit criterion id")
+        text = item.get("text")
+        status = item.get("status", "active")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(status, str)
+            or status not in {"active", "retired"}
+            or not re.fullmatch(rf"{re.escape(milestone_id)}-EC\d{{3,}}", criterion_id)
+            or criterion_id in seen_ids
+        ):
+            raise ValueError("Invalid or duplicate structured exit criterion")
+        seen_ids.add(criterion_id)
+        normalized.append({"id": criterion_id, "text": text.strip(), "status": status})
+    return normalized
 
 
 def _compact(value: Any) -> Any:
@@ -525,6 +613,10 @@ class SDDService:
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
+            milestone["exit_criteria_records"] = _exit_criterion_records(
+                milestone_id, milestone["exit_criteria"]
+            )
+            milestone["exit_criteria_schema_version"] = 1
             milestones.append(milestone)
             roadmap["milestones"] = milestones
             atomic_write_json(sdd / "roadmap.json", roadmap)
@@ -545,7 +637,7 @@ class SDDService:
                 milestone_dir / "summary.md", "# Milestone summary\n\nNot completed yet.\n"
             )
             project = self._read_project(sdd)
-            if project.get("status") == "complete":
+            if project.get("status") in {"complete", "overridden"}:
                 project["status"] = "active"
                 project["updated_at"] = utc_now()
                 atomic_write_json(sdd / "project.json", project)
@@ -578,14 +670,106 @@ class SDDService:
                     if key == "status" and value not in _MILESTONE_STATES:
                         raise ValueError(f"Invalid milestone status: {value}")
                     milestone[key] = bool(value) if key == "interfaces_stable" else value
+            legacy_exit_criteria = _string_list(milestone.get("exit_criteria"), "exit criteria")
+            legacy_exit_criteria_records = milestone.get("exit_criteria_records")
+            legacy_schema_version = milestone.get("exit_criteria_schema_version")
+            explicit_criterion_records = "exit_criteria_records" in payload
+            if explicit_criterion_records:
+                if "exit_criteria" in payload:
+                    raise ValueError("Update exit_criteria or exit_criteria_records, not both")
+                existing_records = milestone.get("exit_criteria_records")
+                normalized_records = _validate_exit_criterion_records(
+                    milestone_id,
+                    payload["exit_criteria_records"],
+                    payload.get("exit_criteria_schema_version", 1),
+                )
+                existing_criterion_ids = {
+                    item.get("id")
+                    for item in (existing_records if isinstance(existing_records, list) else [])
+                    if isinstance(item, dict)
+                }
+                submitted_criterion_records = {item["id"]: item for item in normalized_records}
+                if existing_criterion_ids - set(submitted_criterion_records):
+                    raise ValueError(
+                        "Structured criterion updates cannot remove existing criterion IDs; "
+                        "mark removed criteria retired"
+                    )
+                if any(
+                    item.get("status") == "retired"
+                    and submitted_criterion_records[item["id"]].get("status") != "retired"
+                    for item in (existing_records if isinstance(existing_records, list) else [])
+                    if isinstance(item, dict) and item.get("id") in submitted_criterion_records
+                ):
+                    raise ValueError("Retired exit criterion IDs cannot be reactivated")
+                if any(
+                    submitted_criterion_records[criterion_id].get("text") != item.get("text")
+                    for item in (existing_records if isinstance(existing_records, list) else [])
+                    if isinstance(item, dict)
+                    and (criterion_id := item.get("id")) in submitted_criterion_records
+                ):
+                    raise ValueError(
+                        "Exit criterion text is immutable; assign a new ID to changed text"
+                    )
+                milestone["exit_criteria_records"] = normalized_records
+                milestone["exit_criteria"] = [
+                    item["text"] for item in normalized_records if item["status"] == "active"
+                ]
+                milestone["exit_criteria_schema_version"] = 1
             for key in list_fields:
                 if key in payload:
                     if key == "decision_ids":
                         milestone[key] = _decision_list(payload[key])
                     elif key == "requirement_ids":
                         milestone[key] = _string_list(payload[key], "requirement ids")
-                    else:
+                    elif key == "exit_criteria":
                         milestone[key] = _string_list(payload[key], "exit criteria")
+            if "exit_criteria" in payload:
+                legacy_records = legacy_exit_criteria_records
+                if legacy_schema_version is None and legacy_records is None:
+                    legacy_records = [
+                        {
+                            "id": f"{milestone_id}-EC{index:03d}",
+                            "text": text,
+                            "status": "active",
+                        }
+                        for index, text in enumerate(legacy_exit_criteria, start=1)
+                    ]
+                milestone["exit_criteria_records"] = _exit_criterion_records(
+                    milestone_id,
+                    milestone["exit_criteria"],
+                    legacy_records,
+                )
+                milestone["exit_criteria_schema_version"] = 1
+            elif "exit_criteria_records" not in milestone:
+                milestone["exit_criteria_records"] = _exit_criterion_records(
+                    milestone_id,
+                    _string_list(milestone.get("exit_criteria"), "exit criteria"),
+                )
+                milestone["exit_criteria_schema_version"] = 1
+            else:
+                milestone["exit_criteria_records"] = _validate_exit_criterion_records(
+                    milestone_id,
+                    milestone["exit_criteria_records"],
+                    milestone.get("exit_criteria_schema_version"),
+                )
+            retired_criteria_ids = {
+                item["id"]
+                for item in milestone["exit_criteria_records"]
+                if item["status"] == "retired"
+            }
+            if retired_criteria_ids:
+                current_plan = self._read_required_json_path(milestone_dir / "plan.json")
+                linked_tasks = [
+                    str(task.get("id"))
+                    for task in self._require_object_list(current_plan, "tasks", "plan tasks")
+                    if retired_criteria_ids
+                    & set(_string_list(task.get("exit_criteria_ids"), "task exit criterion ids"))
+                ]
+                if linked_tasks:
+                    raise ValueError(
+                        "Exit criteria cannot be retired while linked to tasks: "
+                        + ", ".join(linked_tasks)
+                    )
             milestone["updated_at"] = utc_now()
             atomic_write_json(milestone_dir / "milestone.json", milestone)
             if "context" in payload:
@@ -687,6 +871,10 @@ class SDDService:
                     ),
                     "acceptance": _string_list(
                         raw.get("acceptance", previous.get("acceptance", [])), "task acceptance"
+                    ),
+                    "exit_criteria_ids": _string_list(
+                        raw.get("exit_criteria_ids", previous.get("exit_criteria_ids", [])),
+                        "task exit criterion ids",
                     ),
                     "file_scope": _string_list(
                         raw.get("file_scope", previous.get("file_scope", [])), "task file scope"
@@ -824,6 +1012,16 @@ class SDDService:
             reason = "parallel disabled until interfaces are stable"
         elif ready and not eligible and active:
             reason = "ready tasks conflict with or must wait for active work"
+        elif not ready and any(task.get("status") == "blocked" for task in all_tasks):
+            reason = "no dependency-ready task; blocked tasks require recovery"
+        elif (
+            not ready
+            and all_tasks
+            and all(task.get("status") in {"done", "skipped"} for task in all_tasks)
+        ):
+            reason = "milestone tasks are terminal; verify and finalize the milestone"
+        elif not ready and all_tasks:
+            reason = "no dependency-ready task; validate the plan and dependency graph"
         return {
             "ok": True,
             "milestone_id": milestone_id,
@@ -877,7 +1075,14 @@ class SDDService:
             "notes",
             "summary",
         }
-        list_fields = {"depends_on", "acceptance", "file_scope", "requirement_ids", "decision_ids"}
+        list_fields = {
+            "depends_on",
+            "acceptance",
+            "file_scope",
+            "requirement_ids",
+            "decision_ids",
+            "exit_criteria_ids",
+        }
         with project_lock(sdd), project_transaction(sdd):
             if payload.get("milestone_id"):
                 milestone_id, milestone_dir, _, plan = self._milestone(
@@ -914,6 +1119,8 @@ class SDDService:
                 if key in payload:
                     if key == "decision_ids":
                         candidate[key] = _decision_list(payload[key])
+                    elif key == "exit_criteria_ids":
+                        candidate[key] = _string_list(payload[key], "task exit criterion ids")
                     else:
                         candidate[key] = _string_list(payload[key], f"task {key}")
             if (
@@ -1115,6 +1322,31 @@ class SDDService:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         self._validate_evidence_payload(task, payload, task_id=task.get("id") if task else None)
+        if payload.get("exit_criteria_ids"):
+            milestone = self._read_required_json_path(milestone_dir / "milestone.json")
+            criteria = milestone.get("exit_criteria_records")
+            if not isinstance(criteria, list):
+                raise ValueError(
+                    "Exit-criterion evidence requires structured milestone exit_criteria_records"
+                )
+            active_ids = {
+                item.get("id")
+                for item in criteria
+                if isinstance(item, dict) and item.get("status") == "active"
+            }
+            requested = set(
+                _string_list(payload.get("exit_criteria_ids"), "evidence exit criterion ids")
+            )
+            unknown = requested - active_ids
+            if unknown:
+                raise ValueError(
+                    "Evidence can only link active exit criteria: " + ", ".join(sorted(unknown))
+                )
+            task_criteria = set(
+                _string_list((task or {}).get("exit_criteria_ids"), "task exit criterion ids")
+            )
+            if not task or not requested <= task_criteria:
+                raise ValueError("Evidence exit criteria must also be linked to the target task")
         existing = read_jsonl(milestone_dir / "evidence.jsonl")
         evidence_id = payload.get("id") or _next_numeric_id(
             [item.get("id", "") for item in existing], "E", 6
@@ -1135,6 +1367,9 @@ class SDDService:
             "passed": passed,
             "command": payload.get("command") or "",
             "artifact": payload.get("artifact") or "",
+            "exit_criteria_ids": _string_list(
+                payload.get("exit_criteria_ids"), "evidence exit criterion ids"
+            ),
             "requirement_ids": _list(
                 payload.get("requirement_ids") or (task.get("requirement_ids", []) if task else [])
             ),
@@ -1166,6 +1401,11 @@ class SDDService:
             for key in ("result", "command", "artifact", "details")
         ):
             raise ValueError("Evidence requires a result, command, artifact, or details")
+        criterion_ids = payload.get("exit_criteria_ids", [])
+        if not isinstance(criterion_ids, list) or any(
+            not isinstance(item, str) or not item.strip() for item in criterion_ids
+        ):
+            raise ValueError("Evidence exit_criteria_ids must be a list of non-empty strings")
         passed = payload.get("passed")
         if passed is not None and not isinstance(passed, bool):
             raise ValueError("Evidence passed must be true, false, or omitted")
@@ -1217,6 +1457,10 @@ class SDDService:
         project_root = self._root(root)
         sdd = self._require(project_root)
         summary = str(payload.get("summary") or "Milestone completed and verified.").strip()
+        forced = bool(options.get("force"))
+        override_reason = str(payload.get("override_reason") or "").strip()
+        if forced and not override_reason:
+            raise ValueError("Forced finalization requires payload.override_reason")
         with project_lock(sdd), project_transaction(sdd):
             milestone_id, milestone_dir, milestone, plan = self._milestone(
                 sdd, target or payload.get("milestone_id")
@@ -1252,30 +1496,80 @@ class SDDService:
             # Finalize just-in-time: defects in future, not-yet-active milestones should
             # remain visible in project health without blocking delivery of this one.
             task_ids = {str(task.get("id")) for task in plan.get("tasks", [])}
+            milestone_criteria = milestone.get("exit_criteria_records", [])
+            if not isinstance(milestone_criteria, list):
+                milestone_criteria = []
+            active_criteria_ids = {
+                item.get("id")
+                for item in milestone_criteria
+                if isinstance(item, dict) and item.get("status") == "active"
+            }
+            legacy_criteria_unmapped = (
+                bool(milestone.get("exit_criteria")) and not active_criteria_ids
+            )
             relevant_targets = {
                 None,
                 milestone_id,
                 *task_ids,
                 *map(str, milestone.get("requirement_ids", [])),
+                *map(
+                    str,
+                    (
+                        requirement_id
+                        for task in plan.get("tasks", [])
+                        for requirement_id in task.get("requirement_ids", [])
+                    ),
+                ),
+                *map(
+                    str,
+                    (item.get("id") for item in milestone_criteria),
+                ),
+                *map(
+                    str,
+                    (
+                        criterion_id
+                        for task in plan.get("tasks", [])
+                        for criterion_id in task.get("exit_criteria_ids", [])
+                    ),
+                ),
             }
             blocking = [
                 item
                 for item in validation.get("findings", [])
-                if (item.get("severity") == "error" and item.get("target") in relevant_targets)
+                if (
+                    item.get("severity") == "error"
+                    and item.get("milestone_id") in (None, milestone_id)
+                    and (
+                        item.get("target") in relevant_targets
+                        or item.get("milestone_id") == milestone_id
+                    )
+                )
                 or (item.get("code") == "task.evidence_missing" and item.get("target") in task_ids)
             ]
+            if legacy_criteria_unmapped:
+                blocking.extend(
+                    item
+                    for item in validation.get("findings", [])
+                    if item.get("code") == "milestone.exit_criteria_unmapped"
+                    and item.get("target") == milestone_id
+                )
             if blocking and not options.get("force"):
                 codes = ", ".join(sorted({str(item.get("code")) for item in blocking}))
                 raise ValueError(
                     f"Milestone cannot be finalized until validation blockers are resolved: {codes}"
                 )
-            milestone["status"] = "verified"
+            milestone["status"] = "overridden" if forced else "verified"
             milestone["completed_at"] = utc_now()
             milestone["updated_at"] = utc_now()
             atomic_write_json(milestone_dir / "milestone.json", milestone)
+            override_prefix = (
+                f"> **Administrative override — not verified.** {override_reason}\n\n"
+                if forced
+                else ""
+            )
             atomic_write_text(
                 milestone_dir / "summary.md",
-                f"# {milestone_id} summary\n\n{summary}\n",
+                f"# {milestone_id} summary\n\n{override_prefix}{summary}\n",
             )
             self._sync_roadmap_milestone(sdd, milestone)
             roadmap = self._read_required_json(sdd, "roadmap.json")
@@ -1283,12 +1577,14 @@ class SDDService:
                 item
                 for item in roadmap.get("milestones", [])
                 if item.get("id") != milestone_id
-                and item.get("status") not in {"verified", "cancelled"}
+                and item.get("status") not in {"verified", "overridden", "cancelled"}
             ]
             state["current_tasks"] = []
             state["active_milestone"] = remaining[0].get("id") if remaining else None
             state["status"] = (
-                "verifying"
+                "overridden"
+                if not remaining and forced
+                else "verifying"
                 if remaining and remaining[0].get("status") == "done"
                 else "planning"
                 if remaining
@@ -1298,7 +1594,7 @@ class SDDService:
             atomic_write_json(sdd / "state.json", state)
             project = self._read_project(sdd)
             if not remaining:
-                project["status"] = "complete"
+                project["status"] = "overridden" if forced else "complete"
                 project["updated_at"] = utc_now()
                 atomic_write_json(sdd / "project.json", project)
             self._event(
@@ -1307,12 +1603,16 @@ class SDDService:
                 milestone_id=milestone_id,
                 next_milestone=state.get("active_milestone"),
                 plan_revision=plan.get("revision", 0),
+                forced=forced,
+                override_reason=override_reason if forced else None,
             )
             render_all(project_root)
         return {
             "ok": True,
             "milestone_id": milestone_id,
-            "status": "verified",
+            "status": milestone["status"],
+            "forced": forced,
+            "override_reason": override_reason if forced else None,
             "next_milestone": state.get("active_milestone"),
             "project_status": project.get("status"),
             "plan_revision": plan.get("revision", 0),
@@ -1440,11 +1740,25 @@ class SDDService:
         milestone_ids = {str(item["id"]) for item in milestone_rows if item.get("id")}
         findings: list[dict[str, Any]] = []
 
-        def add(severity: str, code: str, message: str, target: str | None = None) -> None:
+        def add(
+            severity: str,
+            code: str,
+            message: str,
+            target: str | None = None,
+            **details: Any,
+        ) -> None:
             if config.get("strict") and severity == "warning" and code != "artifact.large":
                 severity = "error"
             findings.append(
-                _compact({"severity": severity, "code": code, "message": message, "target": target})
+                _compact(
+                    {
+                        "severity": severity,
+                        "code": code,
+                        "message": message,
+                        "target": target,
+                        **details,
+                    }
+                )
             )
 
         requirement_id_list = [str(item["id"]) for item in requirement_rows if item.get("id")]
@@ -1506,6 +1820,29 @@ class SDDService:
         all_tasks: dict[str, dict[str, Any]] = {}
         for milestone in milestone_rows:
             milestone_id = str(milestone["id"]) if milestone.get("id") else None
+            criteria_are_structured = "exit_criteria_records" in milestone
+            criterion_records = (
+                _validate_exit_criterion_records(
+                    milestone_id or "",
+                    milestone.get("exit_criteria_records"),
+                    milestone.get("exit_criteria_schema_version"),
+                )
+                if criteria_are_structured
+                else []
+            )
+            active_criteria = {
+                item["id"]: item["text"] for item in criterion_records if item["status"] == "active"
+            }
+            if criteria_are_structured and (
+                type(milestone.get("exit_criteria_schema_version")) is not int
+                or milestone.get("exit_criteria_schema_version") != 1
+            ):
+                add(
+                    "error",
+                    "milestone.exit_criteria_schema_invalid",
+                    "Structured exit criteria require exit_criteria_schema_version 1",
+                    milestone_id,
+                )
             linked_requirements.update(map(str, milestone.get("requirement_ids", [])))
             milestone_file = read_json(sdd / "milestones" / str(milestone_id) / "milestone.json")
             if not milestone_file:
@@ -1517,12 +1854,48 @@ class SDDService:
                 )
             elif any(
                 milestone_file.get(key) != milestone.get(key)
-                for key in ("title", "status", "objective", "interfaces_stable")
+                for key in (
+                    "title",
+                    "status",
+                    "objective",
+                    "interfaces_stable",
+                    "requirement_ids",
+                    "decision_ids",
+                    "exit_criteria",
+                    "exit_criteria_records",
+                    "exit_criteria_schema_version",
+                )
             ):
+                link_drift_codes = {
+                    "requirement_ids": "milestone.requirement_link_drift",
+                    "decision_ids": "milestone.decision_link_drift",
+                    "exit_criteria": "milestone.exit_criteria_drift",
+                    "exit_criteria_records": "milestone.exit_criteria_records_drift",
+                    "exit_criteria_schema_version": "milestone.exit_criteria_schema_drift",
+                }
+                for key, code in link_drift_codes.items():
+                    if milestone_file.get(key) != milestone.get(key):
+                        add(
+                            "error",
+                            code,
+                            f"Roadmap projection differs from milestone metadata for {key}",
+                            milestone_id,
+                        )
+                if any(
+                    milestone_file.get(key) != milestone.get(key)
+                    for key in ("title", "status", "objective", "interfaces_stable")
+                ):
+                    add(
+                        "warning",
+                        "milestone.roadmap_drift",
+                        "Roadmap projection differs from milestone metadata",
+                        milestone_id,
+                    )
+            if milestone.get("exit_criteria") and not criteria_are_structured:
                 add(
                     "warning",
-                    "milestone.roadmap_drift",
-                    "Roadmap projection differs from milestone metadata",
+                    "milestone.exit_criteria_unmapped",
+                    "Legacy prose exit criteria are not linked to evidence; update the milestone to enable proof gating",
                     milestone_id,
                 )
             for req_id in milestone.get("requirement_ids", []):
@@ -1575,12 +1948,87 @@ class SDDService:
             for error in dag_errors:
                 add("error", "plan.invalid_dag", error, milestone_id)
             evidence = read_jsonl(sdd / "milestones" / str(milestone_id) / "evidence.jsonl")
+            task_requirements = {
+                str(task.get("id")): set(map(str, task.get("requirement_ids", [])))
+                for task in tasks
+                if task.get("id")
+            }
+            proof_task_ids = {
+                str(task.get("id"))
+                for task in tasks
+                if task.get("id") and task.get("status") != "skipped"
+            }
+            task_criteria: dict[str, set[str]] = {
+                str(task.get("id")): set(
+                    map(str, _string_list(task.get("exit_criteria_ids"), "task exit criterion ids"))
+                )
+                for task in tasks
+                if task.get("id")
+            }
+            criterion_success_task_ids: dict[str, set[str]] = defaultdict(set)
+            for task in tasks:
+                task_id = str(task.get("id") or "")
+                for criterion_id in task_criteria.get(task_id, set()):
+                    active_ids = set(active_criteria)
+                    if criterion_id not in active_ids:
+                        add(
+                            "error",
+                            "task.unknown_exit_criterion",
+                            f"Task references unknown or retired exit criterion {criterion_id}",
+                            task_id,
+                            milestone_id=milestone_id,
+                        )
+            for item in evidence:
+                task_id = str(item.get("task_id") or "")
+                recorded_criterion_ids = _string_list(
+                    item.get("exit_criteria_ids"), "evidence exit criterion ids"
+                )
+                for criterion_id in recorded_criterion_ids:
+                    criterion_id = str(criterion_id)
+                    known_ids = {row["id"] for row in criterion_records}
+                    if criterion_id not in known_ids:
+                        if any(
+                            row.get("id") == criterion_id and row.get("status") == "retired"
+                            for row in criterion_records
+                        ):
+                            continue
+                        add(
+                            "error",
+                            "evidence.unknown_exit_criterion",
+                            f"Evidence references unknown or retired exit criterion {criterion_id}",
+                            str(item.get("id") or ""),
+                            milestone_id=milestone_id,
+                        )
+                        continue
+                    if criterion_id not in active_criteria:
+                        continue
+                    if criterion_id not in task_criteria.get(task_id, set()):
+                        add(
+                            "error",
+                            "evidence.exit_criterion_task_mismatch",
+                            f"Evidence for exit criterion {criterion_id} is not linked through its task",
+                            str(item.get("id") or ""),
+                            milestone_id=milestone_id,
+                        )
+                        continue
+                    if item.get("passed") is True and task_id in proof_task_ids:
+                        criterion_success_task_ids[criterion_id].add(task_id)
             evidence_by_task = Counter(item.get("task_id") for item in evidence)
             successful_evidence_by_task = Counter(
                 item.get("task_id") for item in evidence if item.get("passed") is True
             )
+            successful_evidence_by_requirement = {
+                str(requirement_id)
+                for item in evidence
+                if item.get("passed") is True and str(item.get("task_id") or "") in proof_task_ids
+                for requirement_id in item.get("requirement_ids", [])
+                if str(requirement_id) in req_ids
+                and str(requirement_id)
+                in task_requirements.get(str(item.get("task_id") or ""), set())
+            }
             for task in tasks:
                 task_id = task.get("id")
+                linked_requirements.update(map(str, task.get("requirement_ids", [])))
                 if task_id:
                     if task_id in all_tasks:
                         add(
@@ -1665,6 +2113,52 @@ class SDDService:
                         "Blocked task has no reason",
                         task_id,
                     )
+
+            for criterion_id, criterion_text in active_criteria.items():
+                if criterion_success_task_ids.get(criterion_id):
+                    continue
+                terminal_plan = bool(tasks) and all(
+                    task.get("status") in {"done", "skipped"} for task in tasks
+                )
+                add(
+                    "error"
+                    if terminal_plan or milestone.get("status") in {"done", "verified"}
+                    else "warning",
+                    "milestone.exit_criterion_proof_missing",
+                    "Active exit criterion has no successful evidence linked through a non-skipped task",
+                    criterion_id,
+                    milestone_id=milestone_id,
+                    criterion=criterion_text,
+                )
+
+            linked_requirement_ids = set(map(str, milestone.get("requirement_ids", [])))
+            linked_requirement_ids.update(
+                str(requirement_id)
+                for task in tasks
+                for requirement_id in task.get("requirement_ids", [])
+            )
+            for requirement in requirement_rows:
+                requirement_id = str(requirement.get("id") or "")
+                if (
+                    requirement_id not in linked_requirement_ids
+                    or requirement.get("status", "active") != "active"
+                    or requirement.get("priority", "must") != "must"
+                    or requirement_id in successful_evidence_by_requirement
+                ):
+                    continue
+                add(
+                    "error"
+                    if milestone.get("status") in {"done", "verified"}
+                    or (
+                        plan.get("tasks")
+                        and all(task.get("status") in {"done", "skipped"} for task in tasks)
+                    )
+                    else "warning",
+                    "requirement.proof_missing",
+                    "Active must-have requirement has no successful evidence linked to it",
+                    requirement_id,
+                    milestone_id=milestone_id,
+                )
 
         if milestone_rows:
             for req in requirement_rows:
@@ -1760,13 +2254,35 @@ class SDDService:
             if milestone.get("id") == state.get("active_milestone"):
                 active = milestone
                 active_plan = plan
-        validation = self.validate(str(project_root), {"record": False}, {"detail": "compact"})
+        validation = self.validate(str(project_root), {"record": False}, {"detail": "normal"})
         next_wave = None
         if active:
             next_wave = self.next(
                 str(project_root), active.get("id"), {}, {"limit": options.get("limit", 4)}
             )
-        return {
+        active_task_ids = {str(task.get("id")) for task in active_plan.get("tasks", [])}
+        active_requirement_ids = set(map(str, (active or {}).get("requirement_ids", [])))
+        active_requirement_ids.update(
+            str(requirement_id)
+            for task in active_plan.get("tasks", [])
+            for requirement_id in task.get("requirement_ids", [])
+        )
+        active_targets = {None, (active or {}).get("id"), *active_task_ids, *active_requirement_ids}
+        active_findings = [
+            item
+            for item in validation.get("findings", [])
+            if item.get("severity") == "error"
+            and (
+                item.get("target") in active_targets
+                or item.get("code") in {"project.goal_missing", "project.mode_invalid"}
+            )
+            and (
+                item.get("code") != "requirement.proof_missing"
+                or item.get("milestone_id") == (active or {}).get("id")
+            )
+        ]
+        active_error_count = len(active_findings)
+        status_result: dict[str, Any] = {
             "ok": True,
             "root": str(project_root),
             "project": {
@@ -1776,10 +2292,80 @@ class SDDService:
             "milestone_count": len(milestone_rows),
             "task_counts": dict(counts),
             "active_milestone": active,
-            "active_tasks": [_compact(task) for task in active_plan.get("tasks", [])],
+            "active_task_count": len(active_plan.get("tasks", [])),
             "next": next_wave,
             "health": {"score": validation.get("score"), "counts": validation.get("counts")},
+            "active_validation": {
+                "error_count": active_error_count,
+                "findings": [
+                    {
+                        key: item[key]
+                        for key in ("severity", "code", "message", "target")
+                        if item.get(key) is not None
+                    }
+                    for item in active_findings[:10]
+                ],
+                "findings_truncated": active_error_count > 10,
+            },
         }
+        next_reason = (next_wave or {}).get("reason")
+        if active_error_count:
+            status_result["action"] = {
+                "kind": "resolve_validation",
+                "reason": "Active milestone has blocking findings; resolve them before advancing.",
+            }
+        elif active and next_wave and next_wave.get("wave"):
+            status_result["action"] = {
+                "kind": "execute_task",
+                "reason": f"Start the next dependency-safe task wave for {active.get('id')}.",
+            }
+        elif next_reason == "milestone tasks are terminal; verify and finalize the milestone":
+            status_result["action"] = {
+                "kind": "verify_milestone",
+                "reason": next_reason,
+            }
+        elif next_reason == "no dependency-ready task; blocked tasks require recovery":
+            status_result["action"] = {
+                "kind": "resolve_blocker",
+                "reason": next_reason,
+            }
+        elif next_reason == "ready tasks conflict with or must wait for active work":
+            status_result["action"] = {
+                "kind": "reconcile_active_work",
+                "reason": next_reason,
+            }
+        elif next_reason == "parallel disabled until interfaces are stable":
+            status_result["action"] = {
+                "kind": "stabilize_interfaces",
+                "reason": next_reason,
+            }
+        elif active is None:
+            status_result["action"] = {
+                "kind": "plan_milestone",
+                "reason": "No active milestone is selected; choose or create the next outcome to execute.",
+            }
+        elif not active_plan.get("tasks"):
+            status_result["action"] = {
+                "kind": "plan_tasks",
+                "reason": f"Active milestone {active.get('id')} has no executable task plan.",
+            }
+        else:
+            status_result["action"] = {
+                "kind": "inspect_plan",
+                "reason": next_reason or "No safe task wave is available; inspect the plan.",
+            }
+        status_result["action"]["validation_error_count"] = active_error_count
+        if options.get("detail", "normal") != "compact":
+            try:
+                requested_limit = int(options.get("active_task_limit") or 12)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("active_task_limit must be an integer") from exc
+            limit = max(1, min(requested_limit, 50))
+            status_result["active_tasks"] = [
+                _compact(task) for task in active_plan.get("tasks", [])[:limit]
+            ]
+            status_result["active_tasks_truncated"] = len(active_plan.get("tasks", [])) > limit
+        return status_result
 
     def search(
         self, root: str | None, target: str | None, payload: dict[str, Any], options: dict[str, Any]

@@ -107,18 +107,15 @@ def _scope_files(root: Path, scopes: list[Any], *, limit: int = 2000) -> list[Pa
         if not pattern:
             continue
         has_magic = glob.has_magic(pattern)
-        candidates: list[Path]
         if has_magic:
-            candidates = [Path(value) for value in glob.iglob(str(root / pattern), recursive=True)]
+            candidates = (Path(value) for value in glob.iglob(str(root / pattern), recursive=True))
         else:
             candidate = root / pattern
             if candidate.is_dir():
-                candidates = list(candidate.rglob("*"))
+                candidates = candidate.rglob("*")
             else:
-                candidates = [candidate]
+                candidates = iter((candidate,))
         for candidate in candidates:
-            if len(matched) >= limit:
-                return sorted(matched)
             try:
                 resolved = candidate.resolve()
                 relative = resolved.relative_to(root)
@@ -129,6 +126,10 @@ def _scope_files(root: Path, scopes: list[Any], *, limit: int = 2000) -> list[Pa
             if relative.parts and relative.parts[0] in {".git", ".sdd"}:
                 continue
             matched.add(resolved)
+            if len(matched) > limit:
+                raise ValueError(
+                    f"Task file scope matches more than {limit} project files; narrow the scope"
+                )
     return sorted(matched)
 
 

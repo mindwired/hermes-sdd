@@ -41,7 +41,9 @@ Do not finalize while:
 
 - any task remains pending, in progress, or blocked;
 - validation has an error;
-- a must-have requirement lacks observable proof;
+- any active structured milestone exit criterion lacks successful evidence explicitly linked through a non-skipped
+  task that also links that criterion. Legacy prose-only criteria must be migrated with `update_milestone` first;
+- a must-have requirement lacks successful evidence explicitly linked to it through a non-skipped task that also links the requirement;
 - critical behavior relies only on a mocked path;
 - a known regression or security issue is deferred without explicit acceptance.
 
@@ -54,6 +56,11 @@ Warnings may remain when they are understood and proportionate. Record material 
 ```
 
 The plugin marks the milestone verified, advances to the next planned milestone, or completes the project when none remain.
+
+The core normally rejects finalization when the requested milestone is not active, its plan is empty, any task is nonterminal, or validation reports an error. An explicit escape hatch is available as `options: {"force": true}` for deliberate recovery/administrative override only. Force requires `payload.override_reason`, marks the milestone `overridden` rather than `verified`, and records the override in the event and summary; it is not evidence of successful verification. Do not use force to make an incomplete outcome appear verified. Communicate the unresolved blockers explicitly.
+
+Structured exit-criterion validation proves traceability metadata only, not the truth of user-entered evidence claims.
+Do not call a criterion factually proven merely because a task is done or evidence text sounds positive.
 
 ## Output
 

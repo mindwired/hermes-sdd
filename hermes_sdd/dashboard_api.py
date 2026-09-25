@@ -13,7 +13,9 @@ from .version import PLUGIN_ID, __version__
 
 
 def _error(exc: Exception) -> HTTPException:
-    return HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}")
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=f"ValueError: {exc}")
+    return HTTPException(status_code=500, detail="Internal server error")
 
 
 def create_router(service: SDDService | None = None) -> APIRouter:

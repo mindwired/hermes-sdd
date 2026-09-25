@@ -3,18 +3,35 @@
 SDD_SCHEMA = {
     "name": "sdd",
     "description": (
-        "Maintain a compact, durable spec-driven project graph. Use for large or "
-        "multi-session work: initialize, store requirements/architecture, plan milestones, "
-        "select dependency-safe work, update task state, record evidence/decisions, build "
-        "bounded context packs, validate traceability, and manage UI source paths. For exact "
-        "payloads load the sdd:sdd-start, sdd:sdd-plan, sdd:sdd-execute, or "
-        "sdd:sdd-verify skill. Do not use for trivial one-turn edits."
+        "Use for durable multi-session, ambiguous, risky, or coordinated project work; keep trivial "
+        "one-turn edits in normal workflow. Call status for a bounded overview, next for the safe "
+        "task wave, and context_pack for one executor; avoid repeatedly requesting full state. "
+        "Operations: init/configure, upsert_spec, create_milestone/update_milestone, set_plan/"
+        "update_task, next/transition, record_decision/record_evidence, finalize_milestone, "
+        "context_checkpoint/context_delta/context_pack, validate/search, and UI source registry. "
+        "Changing status requires transition with payload.status (pending, in_progress, blocked, "
+        "done, skipped), not update_task. Evidence requires result, command, artifact, or details; "
+        "record_decision requires ADR-0001 IDs. For exact payloads load sdd:sdd-start, sdd:sdd-plan, "
+        "sdd:sdd-execute, or sdd:sdd-verify."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "operation": {
                 "type": "string",
+                "description": (
+                    "Supported: init/status/configure, upsert_spec, create_milestone/update_milestone, "
+                    "set_plan/update_task, next/transition, record_decision/record_evidence, "
+                    "finalize_milestone, context_checkpoint/context_delta/context_pack, validate, "
+                    "search, register_source/list_sources/remove_source. status is read-only; use "
+                    "next to select work. Use transition with payload.status to change task state, "
+                    "update_task for metadata, and record_evidence with result, command, artifact, or "
+                    "details. Link each milestone exit criterion through task.exit_criteria_ids and "
+                    "successful evidence.exit_criteria_ids; legacy prose criteria must be migrated "
+                    "with update_milestone before verified finalization. For exact payloads load "
+                    "sdd:sdd-start, sdd:sdd-plan, sdd:sdd-execute, "
+                    "sdd:sdd-verify, or sdd:sdd-recover."
+                ),
                 "enum": [
                     "init",
                     "status",
@@ -45,11 +62,21 @@ SDD_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Optional task, milestone, checkpoint, decision, or source identifier.",
+                "description": (
+                    "Target ID: task for transition/update_task/record_evidence/context_pack; "
+                    "milestone for next/finalize_milestone; checkpoint for context_delta; "
+                    "source ID/path for remove_source."
+                ),
             },
             "payload": {
                 "type": "object",
-                "description": "Operation-specific structured data. Keep prose concise and put large research in files.",
+                "description": (
+                    "Operation-specific structured data. transition requires status; "
+                    "record_evidence requires result, command, artifact, or details; "
+                    "record_decision IDs use ADR-0001 format. Keep prose concise and put large "
+                    "research in files. Link criterion proof with milestone.exit_criteria_records, "
+                    "task.exit_criteria_ids, and evidence.exit_criteria_ids."
+                ),
                 "additionalProperties": True,
             },
             "options": {

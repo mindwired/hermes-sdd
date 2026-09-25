@@ -33,6 +33,16 @@ def _status_text(result: dict[str, Any]) -> str:
         f"- Health: **{health.get('score', 'n/a')}**",
         f"- Tasks: {json.dumps(counts, sort_keys=True)}",
     ]
+    action = result.get("action") or {}
+    if action:
+        lines.extend(["", f"## Recommended next action: `{action.get('kind', 'inspect')}`"])
+        lines.append(str(action.get("reason") or ""))
+        active_validation = result.get("active_validation") or {}
+        for finding in active_validation.get("findings", []):
+            lines.append(
+                f"- `{finding.get('code')}` — {finding.get('message')} "
+                f"({finding.get('target') or 'project'})"
+            )
     if next_wave:
         lines.extend(["", "## Next safe wave"])
         lines.extend(f"- `{task.get('id')}` — {task.get('title')}" for task in next_wave)
@@ -140,7 +150,8 @@ def handle_sdd(service: SDDService, raw_args: str) -> str:
                 "`/sdd [status]`, `/sdd init [mode] <goal>`, `/sdd next [milestone]`, "
                 "`/sdd validate`, `/sdd pack [task]`, `/sdd checkpoint [task]`, "
                 "`/sdd mode <mode>`, `/sdd sources`, `/sdd doctor`, `/sdd ui ...`; "
-                "add `--root PATH` when needed."
+                "add `--root PATH` when needed. If the chat composer does not suggest `/sdd`, "
+                "type it directly; Desktop may omit plugin commands from its picker."
             )
         return f"Unknown SDD command: {command}. Run `/sdd help`."
     except Exception as exc:
