@@ -1,8 +1,8 @@
 # Hermes SDD Deep Review — Final Review Report
 
-**Status:** SDD implementation is pushed at `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` (116 tests and pinned Dashboard API tests pass). Final review report updates are pushed through `c782760`. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is committed/pushed as `b994aa3`; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Remaining separate limitations: GUI rendering/accessibility/clipboard acceptance and historical validation findings in consumer `.sdd/`; gateway messaging/HA adapters are disabled by profile policy and out of scope.
+**Status:** SDD implementation commit `bd1018f` is pushed (116 tests and pinned Dashboard API tests pass); subsequent review-report corrections are pushed too and the source worktree is clean. The implementation SHA passed disposable Hermes profile doctor, CLI init/status, and Desktop-adapter install checks. Consumer integration is pushed; consumer `just check` passed 254 tests, and the active profile reconciles to the pinned SDD Git checkout. The requested plugin pin/install is complete. Separate limitations: GUI rendering/accessibility/clipboard acceptance and historical validation findings in consumer `.sdd/`; gateway messaging/HA adapters remain disabled by profile policy and outside the pin scope.
 **Repository:** `/home/felipe.arantes/Projects/hermes-sdd`
-**Branch:** `main` at pushed commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c`
+**Branch:** `main` clean and synchronized with `origin/main`; implementation commit `bd1018fe8cea44dac4a383080b194e7eb24a1c9c` is pushed.
 **Purpose:** Evidence-backed review of Hermes SDD's real-world usefulness, safety/integrity, product surfaces, and release readiness. Findings distinguish observed defects from design risks and product hypotheses.
 
 > This report covers the current local working tree only. It is not evidence that graphical host integration or any future published release has been deployed or verified.
@@ -15,9 +15,9 @@ The project retains a useful compact architecture: one Agent tool with progressi
 
 The application static scan labeled ordinary test/CI subprocess use and test paths as caution findings; install was first blocked and then deliberately continued only inside the disposable Hermes home with `--force`. This did not disable scanning globally or alter the active profile. Preserve the distinction between static matches, actual runtime behavior, and GUI acceptance.
 
-**Release recommendation:** source implementation is pushed, verified, and the exact revision passes disposable-profile install/runtime smoke. A tracked-source archive build passed. GUI acceptance for Dashboard/Desktop is not verified. Gateway adapters remain intentionally disabled, outside the plugin-pin scope.
+**Release recommendation:** source implementation is pushed, verified, and the exact revision passes disposable-profile install/runtime smoke. A tracked-source archive build passed. GUI acceptance for Dashboard/Desktop is not verified. Gateway adapters remain intentionally disabled and outside this plugin-pin scope.
 
-**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and consumer commits through `aa4cb59` are pushed. Source report updates are pushed through `c782760`. Consumer Report 147 records the pinned revision and evidence; existing consumer `.sdd/` state was preserved.
+**Follow-up request (2026-09-24):** re-review, implement fixes, commit/push, then audit and install in `~/Projects/agent`. Source implementation commit `bd1018f` and subsequent review-report commits are pushed. Consumer integration and Report 147 are pushed. Existing consumer `.sdd/` state was preserved.
 
 ## Scope and method
 
